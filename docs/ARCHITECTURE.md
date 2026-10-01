@@ -26,7 +26,7 @@ All three must be included in backups. Losing the Fernet key means already store
 
 Income/expense rows carry `created_by`. Normal financial queries always filter on the authenticated user, including dashboard, reminders, exports and AI context generation. Administrator privileges manage users, global account/category templates and AI profiles but do not implicitly bypass financial ownership in the normal UI/API.
 
-Accounts and categories are shared administrator-managed templates. A member can hide a template for their own view without deleting it globally.
+Accounts/categories use a two-level catalog: administrator-created global templates plus user-owned private accounts, cards/payment methods and categories. Users may hide global templates locally, while private catalog rows are only returned to their owner. Expense assignment endpoints revalidate catalog ownership server-side.
 
 ## Effective-dated prices
 

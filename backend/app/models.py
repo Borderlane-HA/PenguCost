@@ -18,17 +18,21 @@ class User(Base):
 class Account(Base):
     __tablename__ = 'accounts'
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
     kind: Mapped[str] = mapped_column(String(40), default='bank')
     note: Mapped[str] = mapped_column(String(255), default='')
+    # NULL = global administrator template, otherwise private to this user.
+    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
 
 
 class Category(Base):
     __tablename__ = 'categories'
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), unique=True)
+    name: Mapped[str] = mapped_column(String(100))
     icon: Mapped[str] = mapped_column(String(40), default='wallet')
     color: Mapped[str] = mapped_column(String(16), default='#5B5CF0')
+    # NULL = global administrator template, otherwise private to this user.
+    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
 
 
 class HiddenCatalogItem(Base):

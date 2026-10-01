@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+- Added private per-user accounts, cards/payment methods and categories alongside global administrator templates.
+- Global templates can still be hidden per user without affecting anyone else.
+- Users can create, edit and delete their own catalog items; private items are never exposed to other users in the normal UI.
+- Added direct private category and account/payment-method creation from the New/Edit Entry form.
+- Added account/payment-method types for bank accounts, credit/debit cards, PayPal, direct debit, cash and other methods.
+- Renamed the catalog workspace to **Accounts, Cards & Categories** and added global/private ownership badges.
+- Clarified the estimated amount option as **estimated / variable**, with explanatory help text.
+- Extended personal JSON export/import and full administrator backup/restore to preserve private catalogs and catalog ownership.
+- Hardened expense and bulk-update ownership checks so users cannot attach another user’s private catalog IDs.
+
 ## 0.4.0
 
 - Added Excel-style sorting and per-column filters for income and expenses.

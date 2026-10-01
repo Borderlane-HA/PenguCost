@@ -1,7 +1,7 @@
 export type PricePeriod={id:number;amount:number;valid_from:string;valid_to:string|null}
 export type Expense={id:number;name:string;provider:string;entry_type:'expense'|'income';amount:number;currency:string;billing_interval:string;interval_months:number;monthly_equivalent:number;yearly_equivalent:number;category_id:number|null;category:string|null;category_color:string;account_id:number|null;account:string|null;start_date:string|null;next_due_date:string|null;contract_end:string|null;effective_contract_end:string|null;cancellation_date:string|null;effective_cancellation_date:string|null;minimum_term_months:number|null;renewal_period_months:number|null;renewal_amount:number|null;cancellation_notice_days:number|null;cancelled_on:string|null;auto_renew:boolean;status:string;essential:boolean;recurrence_type:'recurring'|'one_time';amount_estimated:boolean;contract_url:string;contract_reference:string;tags:string;notes:string;price_history:PricePeriod[];next_price_change:{amount:number;valid_from:string}|null}
-export type Account={id:number;name:string;kind:string;note:string}
-export type Category={id:number;name:string;icon:string;color:string}
+export type Account={id:number;name:string;kind:string;note:string;scope:'global'|'private';created_by:number|null;can_edit:boolean}
+export type Category={id:number;name:string;icon:string;color:string;scope:'global'|'private';created_by:number|null;can_edit:boolean}
 export type User={id:number;username:string;display_name:string;role:string;is_active?:boolean;version?:string}
 export type AIProvider={id:string;label:string;default_base_url:string;key_optional:boolean}
 export type AIProfile={id:number;name:string;provider:string;provider_label:string;model:string;enabled:boolean;base_url?:string;has_api_key?:boolean}

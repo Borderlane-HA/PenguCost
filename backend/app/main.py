@@ -20,7 +20,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.0'
+APP_VERSION = '0.4.1'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -52,12 +52,39 @@ def migrate_schema():
             for statement in statements:
                 conn.execute(text(statement))
     category_columns = {c['name'] for c in inspect(engine).get_columns('categories')}
-    if 'color' not in category_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE categories ADD COLUMN color VARCHAR(16) DEFAULT '#5B5CF0'"))
+    account_columns = {c['name'] for c in inspect(engine).get_columns('accounts')}
     with engine.begin() as conn:
+        if 'color' not in category_columns:
+            conn.execute(text("ALTER TABLE categories ADD COLUMN color VARCHAR(16) DEFAULT '#5B5CF0'"))
+        if 'created_by' not in category_columns:
+            conn.execute(text('ALTER TABLE categories ADD COLUMN created_by INTEGER'))
+        if 'created_by' not in account_columns:
+            conn.execute(text('ALTER TABLE accounts ADD COLUMN created_by INTEGER'))
+
+        # Older releases defined catalog names as globally UNIQUE. Rebuild those two
+        # lightweight catalog tables once so different users may use the same private
+        # name while global templates still stay unique. Existing IDs are preserved.
+        account_sql = (conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'")).scalar() or '').upper()
+        if 'UNIQUE' in account_sql:
+            conn.execute(text("CREATE TABLE accounts__041 (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR(120) NOT NULL, kind VARCHAR(40) NOT NULL DEFAULT 'bank', note VARCHAR(255) NOT NULL DEFAULT '', created_by INTEGER, FOREIGN KEY(created_by) REFERENCES users (id))"))
+            conn.execute(text("INSERT INTO accounts__041 (id,name,kind,note,created_by) SELECT id,name,kind,note,created_by FROM accounts"))
+            conn.execute(text('DROP TABLE accounts'))
+            conn.execute(text('ALTER TABLE accounts__041 RENAME TO accounts'))
+        category_sql = (conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'")).scalar() or '').upper()
+        if 'UNIQUE' in category_sql:
+            conn.execute(text("CREATE TABLE categories__041 (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR(100) NOT NULL, icon VARCHAR(40) NOT NULL DEFAULT 'wallet', color VARCHAR(16) NOT NULL DEFAULT '#5B5CF0', created_by INTEGER, FOREIGN KEY(created_by) REFERENCES users (id))"))
+            conn.execute(text("INSERT INTO categories__041 (id,name,icon,color,created_by) SELECT id,name,icon,color,created_by FROM categories"))
+            conn.execute(text('DROP TABLE categories'))
+            conn.execute(text('ALTER TABLE categories__041 RENAME TO categories'))
+
         conn.execute(text('CREATE INDEX IF NOT EXISTS ix_expenses_created_by ON expenses (created_by)'))
         conn.execute(text('CREATE INDEX IF NOT EXISTS ix_expenses_entry_type ON expenses (entry_type)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_categories_created_by ON categories (created_by)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_accounts_created_by ON accounts (created_by)'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_categories_global_name ON categories (name) WHERE created_by IS NULL'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_categories_private_name ON categories (created_by, name) WHERE created_by IS NOT NULL'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_global_name ON accounts (name) WHERE created_by IS NULL'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_private_name ON accounts (created_by, name) WHERE created_by IS NOT NULL'))
 
 
 migrate_schema()
@@ -115,12 +142,20 @@ class AccountIn(BaseModel):
     name: str
     kind: str = 'bank'
     note: str = ''
+    scope: Literal['private', 'global'] = 'private'
+
+
+class AccountPatch(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    note: Optional[str] = None
 
 
 class CategoryIn(BaseModel):
     name: str
     icon: str = 'wallet'
     color: str = '#5B5CF0'
+    scope: Literal['private', 'global'] = 'private'
 
 
 class CategoryPatch(BaseModel):
@@ -513,23 +548,77 @@ def patch_user(user_id: int, data: UserPatch, admin: User = Depends(require_admi
     return {'ok': True}
 
 
+def _catalog_scope(owner_id: int | None) -> str:
+    return 'global' if owner_id is None else 'private'
+
+
+def _can_manage_catalog(user: User, owner_id: int | None) -> bool:
+    return (owner_id is None and user.role == 'admin') or owner_id == user.id
+
+
+def _account_dict(x: Account, user: User) -> dict[str, Any]:
+    return {
+        'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note,
+        'scope': _catalog_scope(x.created_by), 'created_by': x.created_by,
+        'can_edit': _can_manage_catalog(user, x.created_by),
+    }
+
+
+def _category_dict(x: Category, user: User) -> dict[str, Any]:
+    return {
+        'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color or '#5B5CF0',
+        'scope': _catalog_scope(x.created_by), 'created_by': x.created_by,
+        'can_edit': _can_manage_catalog(user, x.created_by),
+    }
+
+
+def _validate_category_color(color: str) -> str:
+    value = (color or '#5B5CF0').strip()
+    if not (len(value) == 7 and value.startswith('#') and all(c in '0123456789abcdefABCDEF' for c in value[1:])):
+        raise HTTPException(400, 'Color must be a hex value like #5B5CF0')
+    return value.upper()
+
+
 @app.get('/api/accounts')
 def get_accounts(user: User = Depends(current_user), db: Session = Depends(get_db)):
     hidden = hidden_ids(db, user, 'account')
-    return [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note} for x in db.scalars(select(Account).order_by(Account.name)) if x.id not in hidden]
+    rows = db.scalars(select(Account).where((Account.created_by == None) | (Account.created_by == user.id)).order_by(Account.name)).all()
+    return [_account_dict(x, user) for x in rows if x.created_by is not None or x.id not in hidden]
 
 
 @app.post('/api/accounts')
-def add_account(data: AccountIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
-    x = Account(**data.model_dump())
+def add_account(data: AccountIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if data.scope == 'global' and user.role != 'admin':
+        raise HTTPException(403, 'Only administrators can create global account templates')
+    x = Account(name=data.name.strip(), kind=data.kind or 'bank', note=data.note or '', created_by=None if data.scope == 'global' else user.id)
+    if not x.name:
+        raise HTTPException(400, 'Name is required')
     db.add(x)
     try:
-        db.commit()
-        db.refresh(x)
+        db.commit(); db.refresh(x)
     except Exception:
-        db.rollback()
-        raise HTTPException(409, 'Account already exists')
-    return {'id': x.id}
+        db.rollback(); raise HTTPException(409, 'Account already exists')
+    return _account_dict(x, user)
+
+
+@app.patch('/api/accounts/{item_id}')
+def patch_account(item_id: int, data: AccountPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    x = db.get(Account, item_id)
+    if not x:
+        raise HTTPException(404, 'Not found')
+    if not _can_manage_catalog(user, x.created_by):
+        raise HTTPException(403, 'You cannot edit this account template')
+    if data.name is not None:
+        value = data.name.strip()
+        if not value: raise HTTPException(400, 'Name is required')
+        x.name = value
+    if data.kind is not None: x.kind = data.kind[:40]
+    if data.note is not None: x.note = data.note[:255]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback(); raise HTTPException(409, 'Account already exists')
+    return _account_dict(x, user)
 
 
 @app.delete('/api/accounts/{item_id}')
@@ -537,53 +626,62 @@ def delete_account(item_id: int, user: User = Depends(current_user), db: Session
     x = db.get(Account, item_id)
     if not x:
         raise HTTPException(404, 'Not found')
-    if user.role != 'admin':
-        hide_catalog_item(db, user, 'account', item_id)
-        db.commit()
-        return {'ok': True, 'hidden_only': True}
-    refs = db.scalar(select(func.count(Expense.id)).where(Expense.account_id == item_id)) or 0
-    if refs:
-        raise HTTPException(409, 'Konto wird noch verwendet und kann deshalb nicht global gelöscht werden')
-    db.delete(x)
-    db.commit()
+    if x.created_by is None:
+        if user.role != 'admin':
+            hide_catalog_item(db, user, 'account', item_id); db.commit()
+            return {'ok': True, 'hidden_only': True}
+        refs = db.scalar(select(func.count(Expense.id)).where(Expense.account_id == item_id)) or 0
+        if refs:
+            raise HTTPException(409, 'Konto wird noch verwendet und kann deshalb nicht global gelöscht werden')
+    else:
+        if x.created_by != user.id:
+            raise HTTPException(403, 'You cannot delete this account')
+        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.account_id == item_id)):
+            expense.account_id = None
+    db.delete(x); db.commit()
     return {'ok': True, 'hidden_only': False}
 
 
 @app.get('/api/categories')
 def get_categories(user: User = Depends(current_user), db: Session = Depends(get_db)):
     hidden = hidden_ids(db, user, 'category')
-    return [{'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color or '#5B5CF0'} for x in db.scalars(select(Category).order_by(Category.name)) if x.id not in hidden]
+    rows = db.scalars(select(Category).where((Category.created_by == None) | (Category.created_by == user.id)).order_by(Category.name)).all()
+    return [_category_dict(x, user) for x in rows if x.created_by is not None or x.id not in hidden]
 
 
 @app.post('/api/categories')
-def add_category(data: CategoryIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
-    x = Category(**data.model_dump())
+def add_category(data: CategoryIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if data.scope == 'global' and user.role != 'admin':
+        raise HTTPException(403, 'Only administrators can create global category templates')
+    x = Category(name=data.name.strip(), icon=data.icon or 'wallet', color=_validate_category_color(data.color), created_by=None if data.scope == 'global' else user.id)
+    if not x.name:
+        raise HTTPException(400, 'Name is required')
     db.add(x)
     try:
-        db.commit()
-        db.refresh(x)
+        db.commit(); db.refresh(x)
     except Exception:
-        db.rollback()
-        raise HTTPException(409, 'Category already exists')
-    return {'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color or '#5B5CF0'}
+        db.rollback(); raise HTTPException(409, 'Category already exists')
+    return _category_dict(x, user)
 
 
 @app.patch('/api/categories/{item_id}')
-def patch_category(item_id: int, data: CategoryPatch, _: User = Depends(require_admin), db: Session = Depends(get_db)):
+def patch_category(item_id: int, data: CategoryPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = db.get(Category, item_id)
     if not x:
         raise HTTPException(404, 'Not found')
+    if not _can_manage_catalog(user, x.created_by):
+        raise HTTPException(403, 'You cannot edit this category template')
     if data.name is not None:
-        x.name = data.name.strip()
-    if data.icon is not None:
-        x.icon = data.icon
-    if data.color is not None:
-        color = data.color.strip()
-        if not (len(color) == 7 and color.startswith('#') and all(c in '0123456789abcdefABCDEF' for c in color[1:])):
-            raise HTTPException(400, 'Color must be a hex value like #5B5CF0')
-        x.color = color.upper()
-    db.commit()
-    return {'ok': True}
+        value = data.name.strip()
+        if not value: raise HTTPException(400, 'Name is required')
+        x.name = value
+    if data.icon is not None: x.icon = data.icon
+    if data.color is not None: x.color = _validate_category_color(data.color)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback(); raise HTTPException(409, 'Category already exists')
+    return _category_dict(x, user)
 
 
 @app.delete('/api/categories/{item_id}')
@@ -591,15 +689,19 @@ def delete_category(item_id: int, user: User = Depends(current_user), db: Sessio
     x = db.get(Category, item_id)
     if not x:
         raise HTTPException(404, 'Not found')
-    if user.role != 'admin':
-        hide_catalog_item(db, user, 'category', item_id)
-        db.commit()
-        return {'ok': True, 'hidden_only': True}
-    refs = db.scalar(select(func.count(Expense.id)).where(Expense.category_id == item_id)) or 0
-    if refs:
-        raise HTTPException(409, 'Rubrik wird noch verwendet und kann deshalb nicht global gelöscht werden')
-    db.delete(x)
-    db.commit()
+    if x.created_by is None:
+        if user.role != 'admin':
+            hide_catalog_item(db, user, 'category', item_id); db.commit()
+            return {'ok': True, 'hidden_only': True}
+        refs = db.scalar(select(func.count(Expense.id)).where(Expense.category_id == item_id)) or 0
+        if refs:
+            raise HTTPException(409, 'Rubrik wird noch verwendet und kann deshalb nicht global gelöscht werden')
+    else:
+        if x.created_by != user.id:
+            raise HTTPException(403, 'You cannot delete this category')
+        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.category_id == item_id)):
+            expense.category_id = None
+    db.delete(x); db.commit()
     return {'ok': True, 'hidden_only': False}
 
 
@@ -615,6 +717,17 @@ def reset_hidden_catalog(user: User = Depends(current_user), db: Session = Depen
 @app.get('/api/expenses')
 def get_expenses(user: User = Depends(current_user), db: Session = Depends(get_db)):
     return [expense_dict(x) for x in db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.name))]
+
+
+def validate_catalog_access(db: Session, user: User, category_id: int | None, account_id: int | None):
+    if category_id is not None:
+        item = db.get(Category, category_id)
+        if not item or item.created_by not in (None, user.id):
+            raise HTTPException(403, 'Category is not available to this user')
+    if account_id is not None:
+        item = db.get(Account, account_id)
+        if not item or item.created_by not in (None, user.id):
+            raise HTTPException(403, 'Account is not available to this user')
 
 
 def normalized_expense_data(data: ExpenseIn):
@@ -636,6 +749,7 @@ def upsert_price(db: Session, x: Expense, amount: float, effective_from: date):
 
 @app.post('/api/expenses')
 def add_expense(data: ExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    validate_catalog_access(db, user, data.category_id, data.account_id)
     payload = normalized_expense_data(data)
     initial_amount = payload['amount']
     x = Expense(**payload, created_by=user.id)
@@ -650,6 +764,7 @@ def add_expense(data: ExpenseIn, user: User = Depends(current_user), db: Session
 @app.put('/api/expenses/{item_id}')
 def update_expense(item_id: int, data: ExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = owned_expense(db, user, item_id)
+    validate_catalog_access(db, user, data.category_id, data.account_id)
     old_contract_end = x.contract_end
     old_cancellation_date = x.cancellation_date
     payload = normalized_expense_data(data)
@@ -713,6 +828,10 @@ class BulkExpenseIn(BaseModel):
 
 @app.post('/api/expenses/bulk')
 def bulk_expenses(data: BulkExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if data.action == 'category' and data.value not in (None, ''):
+        validate_catalog_access(db, user, int(data.value), None)
+    if data.action == 'account' and data.value not in (None, ''):
+        validate_catalog_access(db, user, None, int(data.value))
     rows = list(db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.id.in_(data.ids))))
     changed = 0
     for x in rows:
@@ -925,8 +1044,8 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
         'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': x.amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': x.interval_months,
         'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months, 'renewal_amount': x.renewal_amount,
-        'category_id': x.category_id, 'category_name': x.category.name if x.category else None,
-        'account_id': x.account_id, 'account_name': x.account.name if x.account else None,
+        'category_id': x.category_id, 'category_name': x.category.name if x.category else None, 'category_scope': (_catalog_scope(x.category.created_by) if x.category else None),
+        'account_id': x.account_id, 'account_name': x.account.name if x.account else None, 'account_scope': (_catalog_scope(x.account.created_by) if x.account else None),
         'start_date': _iso(x.start_date), 'next_due_date': _iso(x.next_due_date),
         'contract_end': _iso(x.contract_end), 'cancellation_date': _iso(x.cancellation_date),
         'cancellation_notice_days': x.cancellation_notice_days, 'cancelled_on': _iso(x.cancelled_on),
@@ -969,12 +1088,18 @@ def export_user_data(user: User = Depends(current_user), db: Session = Depends(g
     reminders = list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id).order_by(ReminderAction.id)))
     conversations = list(db.scalars(select(AIConversation).where(AIConversation.user_id == user.id).order_by(AIConversation.id)))
     brain = db.get(AIBrain, user.id)
+    private_accounts = list(db.scalars(select(Account).where(Account.created_by == user.id).order_by(Account.id)))
+    private_categories = list(db.scalars(select(Category).where(Category.created_by == user.id).order_by(Category.id)))
     return {
-        'format': 'pengucost-user-export', 'schema_version': 3, 'app_version': APP_VERSION,
+        'format': 'pengucost-user-export', 'schema_version': 4, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'user': {'username': user.username, 'display_name': user.display_name},
         'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
         'hidden_catalog': {'accounts': sorted(hidden_accounts), 'categories': sorted(hidden_categories)},
+        'private_catalog': {
+            'accounts': [{'name': x.name, 'kind': x.kind, 'note': x.note} for x in private_accounts],
+            'categories': [{'name': x.name, 'icon': x.icon, 'color': x.color} for x in private_categories],
+        },
         'expenses': [_raw_expense(x) for x in expenses],
         'reminder_actions': [{'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in reminders],
         'ai_brain': {'summary': brain.summary, 'updated_at': _iso(brain.updated_at)} if brain else None,
@@ -1000,16 +1125,42 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
         for r in list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id))): db.delete(r)
         for x in list(db.scalars(select(Expense).where(Expense.created_by == user.id))): db.delete(x)
     for h in list(db.scalars(select(HiddenCatalogItem).where(HiddenCatalogItem.user_id == user.id))): db.delete(h)
+    for x in list(db.scalars(select(Category).where(Category.created_by == user.id))): db.delete(x)
+    for x in list(db.scalars(select(Account).where(Account.created_by == user.id))): db.delete(x)
     db.flush()
 
-    categories_by_name = {x.name: x.id for x in db.scalars(select(Category))}
-    accounts_by_name = {x.name: x.id for x in db.scalars(select(Account))}
+    private = payload.get('private_catalog') or {}
+    for row in private.get('accounts') or []:
+        db.add(Account(name=str(row.get('name') or '')[:120], kind=str(row.get('kind') or 'bank')[:40], note=str(row.get('note') or '')[:255], created_by=user.id))
+    for row in private.get('categories') or []:
+        db.add(Category(name=str(row.get('name') or '')[:100], icon=str(row.get('icon') or 'wallet')[:40], color=_validate_category_color(str(row.get('color') or '#5B5CF0')), created_by=user.id))
+    try:
+        db.flush()
+    except Exception:
+        db.rollback(); raise HTTPException(409, 'Private catalog import contains duplicate names')
+
+    global_categories_by_name = {x.name: x.id for x in db.scalars(select(Category).where(Category.created_by == None))}
+    private_categories_by_name = {x.name: x.id for x in db.scalars(select(Category).where(Category.created_by == user.id))}
+    global_accounts_by_name = {x.name: x.id for x in db.scalars(select(Account).where(Account.created_by == None))}
+    private_accounts_by_name = {x.name: x.id for x in db.scalars(select(Account).where(Account.created_by == user.id))}
+    categories_by_name = {**global_categories_by_name, **private_categories_by_name}
+    accounts_by_name = {**global_accounts_by_name, **private_accounts_by_name}
     warnings: list[str] = []
     id_map: dict[int, int] = {}
     for row in expenses_in:
         cat_name, account_name = row.get('category_name'), row.get('account_name')
-        category_id = categories_by_name.get(cat_name) if cat_name else None
-        account_id = accounts_by_name.get(account_name) if account_name else None
+        if row.get('category_scope') == 'private':
+            category_id = private_categories_by_name.get(cat_name) if cat_name else None
+        elif row.get('category_scope') == 'global':
+            category_id = global_categories_by_name.get(cat_name) if cat_name else None
+        else:
+            category_id = categories_by_name.get(cat_name) if cat_name else None
+        if row.get('account_scope') == 'private':
+            account_id = private_accounts_by_name.get(account_name) if account_name else None
+        elif row.get('account_scope') == 'global':
+            account_id = global_accounts_by_name.get(account_name) if account_name else None
+        else:
+            account_id = accounts_by_name.get(account_name) if account_name else None
         if cat_name and category_id is None: warnings.append(f'Unknown category: {cat_name}')
         if account_name and account_id is None: warnings.append(f'Unknown account: {account_name}')
         x = _new_expense_from_export(row, user.id, category_id, account_id)
@@ -1025,10 +1176,10 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
 
     hidden = payload.get('hidden_catalog') or {}
     for name in hidden.get('accounts') or []:
-        item_id = accounts_by_name.get(name)
+        item_id = global_accounts_by_name.get(name)
         if item_id: hide_catalog_item(db, user, 'account', item_id)
     for name in hidden.get('categories') or []:
-        item_id = categories_by_name.get(name)
+        item_id = global_categories_by_name.get(name)
         if item_id: hide_catalog_item(db, user, 'category', item_id)
 
     pref = payload.get('preferences') or {}
@@ -1067,11 +1218,11 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     categories = list(db.scalars(select(Category).order_by(Category.id)))
     expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
     return {
-        'format': 'pengucost-admin-export', 'schema_version': 3, 'app_version': APP_VERSION,
+        'format': 'pengucost-admin-export', 'schema_version': 4, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'created_at': _iso(u.created_at)} for u in users],
-        'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note} for x in accounts],
-        'categories': [{'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color} for x in categories],
+        'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note, 'created_by': x.created_by} for x in accounts],
+        'categories': [{'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color, 'created_by': x.created_by} for x in categories],
         'hidden_catalog_items': [{'id': x.id, 'user_id': x.user_id, 'item_type': x.item_type, 'item_id': x.item_id, 'created_at': _iso(x.created_at)} for x in db.scalars(select(HiddenCatalogItem).order_by(HiddenCatalogItem.id))],
         'expenses': [_raw_expense(x) for x in expenses],
         'reminder_actions': [{'id': r.id, 'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_by': r.created_by, 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in db.scalars(select(ReminderAction).order_by(ReminderAction.id))],
@@ -1099,9 +1250,9 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     for u in users_in:
         db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), created_at=_datetime(u.get('created_at'))))
     for x in payload.get('accounts') or []:
-        db.add(Account(id=int(x['id']), name=str(x['name']), kind=str(x.get('kind') or 'bank'), note=str(x.get('note') or '')))
+        db.add(Account(id=int(x['id']), name=str(x['name']), kind=str(x.get('kind') or 'bank'), note=str(x.get('note') or ''), created_by=x.get('created_by')))
     for x in payload.get('categories') or []:
-        db.add(Category(id=int(x['id']), name=str(x['name']), icon=str(x.get('icon') or 'wallet'), color=str(x.get('color') or '#5B5CF0')))
+        db.add(Category(id=int(x['id']), name=str(x['name']), icon=str(x.get('icon') or 'wallet'), color=str(x.get('color') or '#5B5CF0'), created_by=x.get('created_by')))
     db.flush()
     for row in payload.get('expenses') or []:
         x = _new_expense_from_export(row, int(row.get('created_by')), row.get('category_id'), row.get('account_id'))

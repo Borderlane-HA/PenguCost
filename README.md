@@ -86,7 +86,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.0
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.1
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards.
@@ -162,7 +162,7 @@ docker ps --filter name=pengucost
 - contract start/end, notice periods, cancellation deadlines, automatic renewals and optional renewal prices
 - reminder center for upcoming cancellation and renewal dates
 - yearly history, previous-year comparison and explainable future projections from known price and contract data
-- accounts and categories with per-user visibility
+- global admin templates plus private per-user accounts, cards/payment methods and categories
 - strict separation of financial data between users
 - personal JSON export/import plus complete administrator backup/restore
 - Excel-style sorting/filtering, saved views, configurable columns and bulk actions
