@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5
+
+- Fix cloning of contract cancellation dates: cloned deadlines are now recalculated from contract end and cancellation notice instead of remaining tied to the original entry.
+- Contract end or cancellation-notice changes update the derived "cancel by" date immediately in the editor.
+- A manually edited cancellation date intentionally disables automatic recalculation for that draft.
+- The backend clone endpoint now applies the same derived-deadline rule.
+
 ## 0.4.4
 
 - Cloning is useful again: a clone opens as an unsaved draft named `Kopie von …` / `Copy of …` and keeps provider, amount, category, account/payment method, contract dates, renewal settings, tags, AI context and other useful fields.

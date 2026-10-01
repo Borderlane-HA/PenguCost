@@ -28,7 +28,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.4'
+APP_VERSION = '0.4.5'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -955,7 +955,7 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
         billing_interval=source.billing_interval, interval_months=source.interval_months,
         minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months, renewal_amount=source.renewal_amount,
         category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
-        next_due_date=source.next_due_date, contract_end=source.contract_end, cancellation_date=source.cancellation_date,
+        next_due_date=source.next_due_date, contract_end=source.contract_end, cancellation_date=(source.contract_end - timedelta(days=max(0, source.cancellation_notice_days))) if source.contract_end and source.cancellation_notice_days is not None else source.cancellation_date,
         cancellation_notice_days=source.cancellation_notice_days, cancelled_on=None, auto_renew=source.auto_renew,
         status='active', essential=source.essential, recurrence_type=source.recurrence_type, amount_estimated=source.amount_estimated, contract_url=source.contract_url, contract_reference=source.contract_reference, tags=source.tags, notes=source.notes, created_by=user.id,
     )
