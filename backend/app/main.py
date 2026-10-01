@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, Any
 
 from fastapi import FastAPI, Depends, HTTPException, Response, Query
 from fastapi.responses import FileResponse
@@ -19,7 +19,8 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs
 
-app = FastAPI(title='PenguCost', version='0.1.8')
+APP_VERSION = '0.1.9'
+app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
 
@@ -160,6 +161,12 @@ class ReminderSettingsIn(BaseModel):
     cancellation_reminder_days: int = Field(default=30, ge=0, le=3650)
 
 
+class UserPreferencesIn(BaseModel):
+    language: Optional[Literal['de', 'en']] = None
+    ai_prompt: Optional[str] = Field(default=None, max_length=6000)
+    theme: Optional[Literal['system', 'light', 'midnight', 'nordic', 'graphite', 'emerald']] = None
+
+
 class ReminderActionIn(BaseModel):
     action: Literal['done', 'cancelled', 'snooze']
     event_key: str = Field(min_length=1, max_length=160)
@@ -267,9 +274,23 @@ def set_setting_value(db: Session, key: str, value: str):
         db.add(Setting(key=key, value=value))
 
 
+DEFAULT_AI_PROMPT_DE = 'Ich möchte meine monatlichen Fixkosten sinnvoll reduzieren, ohne wichtige Leistungen zu verlieren.'
+DEFAULT_AI_PROMPT_EN = 'I want to reduce my monthly fixed costs sensibly without losing important services.'
+
 def reminder_days_for(db: Session, user: User) -> int:
-    # 0.1.7 makes reminder preference user-specific while falling back to the old global setting.
     return int(setting_value(db, f'reminders.cancellation_days.user.{user.id}', setting_value(db, 'reminders.cancellation_days', '30')))
+
+def language_for(db: Session, user: User) -> str:
+    value = setting_value(db, f'preferences.language.user.{user.id}', 'de')
+    return value if value in {'de', 'en'} else 'de'
+
+def ai_prompt_for(db: Session, user: User) -> str:
+    fallback = DEFAULT_AI_PROMPT_EN if language_for(db, user) == 'en' else DEFAULT_AI_PROMPT_DE
+    return setting_value(db, f'preferences.ai_prompt.user.{user.id}', fallback) or fallback
+
+def theme_for(db: Session, user: User) -> str:
+    value = setting_value(db, f'preferences.theme.user.{user.id}', 'system')
+    return value if value in {'system', 'light', 'midnight', 'nordic', 'graphite', 'emerald'} else 'system'
 
 
 def adopt_orphan_expenses(db: Session, admin_id: int):
@@ -362,7 +383,7 @@ def startup():
 
 @app.get('/api/health')
 def health():
-    return {'status': 'ok', 'service': 'PenguCost', 'version': '0.1.8'}
+    return {'status': 'ok', 'service': 'PenguCost', 'version': APP_VERSION}
 
 
 @app.get('/api/auth/status')
@@ -401,7 +422,7 @@ def logout(response: Response):
 
 @app.get('/api/me')
 def me(user: User = Depends(current_user)):
-    return {'id': user.id, 'username': user.username, 'display_name': user.display_name, 'role': user.role}
+    return {'id': user.id, 'username': user.username, 'display_name': user.display_name, 'role': user.role, 'version': APP_VERSION}
 
 
 @app.get('/api/users')
@@ -607,6 +628,28 @@ def delete_expense(item_id: int, user: User = Depends(current_user), db: Session
     return {'ok': True}
 
 
+@app.post('/api/expenses/{item_id}/clone')
+def clone_expense(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    source = owned_expense(db, user, item_id)
+    suffix = ' (Copy)' if language_for(db, user) == 'en' else ' (Kopie)'
+    clone = Expense(
+        name=(source.name + suffix)[:160], provider=source.provider, amount=source.amount, currency=source.currency,
+        billing_interval=source.billing_interval, interval_months=source.interval_months,
+        minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months,
+        category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
+        next_due_date=source.next_due_date, contract_end=source.contract_end, cancellation_date=source.cancellation_date,
+        cancellation_notice_days=source.cancellation_notice_days, cancelled_on=None, auto_renew=source.auto_renew,
+        status='active', essential=source.essential, tags=source.tags, notes=source.notes, created_by=user.id,
+    )
+    db.add(clone)
+    db.flush()
+    for p in source.prices:
+        db.add(ExpensePrice(expense_id=clone.id, amount=p.amount, valid_from=p.valid_from))
+    db.commit()
+    db.refresh(clone)
+    return expense_dict(clone)
+
+
 @app.get('/api/dashboard')
 def dashboard(ids: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
     items = [x for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.status == 'active')) if is_effectively_active(x)]
@@ -640,6 +683,24 @@ def save_reminder_settings(data: ReminderSettingsIn, user: User = Depends(curren
     set_setting_value(db, f'reminders.cancellation_days.user.{user.id}', str(data.cancellation_reminder_days))
     db.commit()
     return {'ok': True}
+
+
+@app.get('/api/settings/preferences')
+def user_preferences(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user)}
+
+
+@app.put('/api/settings/preferences')
+def save_user_preferences(data: UserPreferencesIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if data.language is not None:
+        set_setting_value(db, f'preferences.language.user.{user.id}', data.language)
+    if data.ai_prompt is not None:
+        language = data.language or language_for(db, user)
+        set_setting_value(db, f'preferences.ai_prompt.user.{user.id}', data.ai_prompt.strip() or (DEFAULT_AI_PROMPT_EN if language == 'en' else DEFAULT_AI_PROMPT_DE))
+    if data.theme is not None:
+        set_setting_value(db, f'preferences.theme.user.{user.id}', data.theme)
+    db.commit()
+    return {'ok': True, 'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user)}
 
 
 def reminder_event(x: Expense, today: date, days: int):
@@ -744,6 +805,202 @@ def reminder_action(expense_id: int, data: ReminderActionIn, user: User = Depend
     return {'ok': True}
 
 
+def _iso(value):
+    return value.isoformat() if value is not None else None
+
+
+def _date(value):
+    if value in (None, ''):
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def _datetime(value):
+    if value in (None, ''):
+        return datetime.utcnow()
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace('Z', '+00:00')).replace(tzinfo=None)
+
+
+def _raw_expense(x: Expense) -> dict[str, Any]:
+    return {
+        'id': x.id, 'name': x.name, 'provider': x.provider, 'amount': x.amount, 'currency': x.currency,
+        'billing_interval': x.billing_interval, 'interval_months': x.interval_months,
+        'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months,
+        'category_id': x.category_id, 'category_name': x.category.name if x.category else None,
+        'account_id': x.account_id, 'account_name': x.account.name if x.account else None,
+        'start_date': _iso(x.start_date), 'next_due_date': _iso(x.next_due_date),
+        'contract_end': _iso(x.contract_end), 'cancellation_date': _iso(x.cancellation_date),
+        'cancellation_notice_days': x.cancellation_notice_days, 'cancelled_on': _iso(x.cancelled_on),
+        'auto_renew': x.auto_renew, 'status': x.status, 'essential': x.essential,
+        'tags': x.tags, 'notes': x.notes, 'created_by': x.created_by,
+        'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at),
+        'prices': [{'id': p.id, 'amount': p.amount, 'valid_from': _iso(p.valid_from), 'created_at': _iso(p.created_at)} for p in x.prices],
+    }
+
+
+def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, account_id: int | None) -> Expense:
+    return Expense(
+        name=str(row.get('name') or 'Imported expense')[:160], provider=str(row.get('provider') or '')[:160],
+        amount=float(row.get('amount') or 0), currency=str(row.get('currency') or 'EUR')[:8],
+        billing_interval=str(row.get('billing_interval') or 'monthly')[:20], interval_months=max(1, int(row.get('interval_months') or 1)),
+        minimum_term_months=row.get('minimum_term_months'), renewal_period_months=row.get('renewal_period_months'),
+        category_id=category_id, account_id=account_id, start_date=_date(row.get('start_date')), next_due_date=_date(row.get('next_due_date')),
+        contract_end=_date(row.get('contract_end')), cancellation_date=_date(row.get('cancellation_date')),
+        cancellation_notice_days=row.get('cancellation_notice_days'), cancelled_on=_date(row.get('cancelled_on')),
+        auto_renew=bool(row.get('auto_renew', False)), status=str(row.get('status') or 'active')[:20],
+        essential=bool(row.get('essential', False)), tags=str(row.get('tags') or '')[:255], notes=str(row.get('notes') or ''),
+        created_by=user_id, created_at=_datetime(row.get('created_at')), updated_at=_datetime(row.get('updated_at')),
+    )
+
+
+@app.get('/api/export/user')
+def export_user_data(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    hidden_rows = list(db.scalars(select(HiddenCatalogItem).where(HiddenCatalogItem.user_id == user.id)))
+    hidden_accounts, hidden_categories = [], []
+    for row in hidden_rows:
+        if row.item_type == 'account':
+            item = db.get(Account, row.item_id)
+            if item: hidden_accounts.append(item.name)
+        elif row.item_type == 'category':
+            item = db.get(Category, row.item_id)
+            if item: hidden_categories.append(item.name)
+    expenses = list(db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.id)))
+    reminders = list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id).order_by(ReminderAction.id)))
+    return {
+        'format': 'pengucost-user-export', 'schema_version': 1, 'app_version': APP_VERSION,
+        'exported_at': datetime.utcnow().isoformat() + 'Z',
+        'user': {'username': user.username, 'display_name': user.display_name},
+        'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
+        'hidden_catalog': {'accounts': sorted(hidden_accounts), 'categories': sorted(hidden_categories)},
+        'expenses': [_raw_expense(x) for x in expenses],
+        'reminder_actions': [{'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in reminders],
+    }
+
+
+@app.post('/api/import/user')
+def import_user_data(payload: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if payload.get('format') != 'pengucost-user-export':
+        raise HTTPException(400, 'Not a PenguCost user export')
+    expenses_in = payload.get('expenses') or []
+    if not isinstance(expenses_in, list):
+        raise HTTPException(400, 'Invalid expenses payload')
+    # Replace only this user's private data. Global admin catalogs and every other user's data remain untouched.
+    expense_ids = list(db.scalars(select(Expense.id).where(Expense.created_by == user.id)))
+    if expense_ids:
+        for r in list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id))): db.delete(r)
+        for x in list(db.scalars(select(Expense).where(Expense.created_by == user.id))): db.delete(x)
+    for h in list(db.scalars(select(HiddenCatalogItem).where(HiddenCatalogItem.user_id == user.id))): db.delete(h)
+    db.flush()
+
+    categories_by_name = {x.name: x.id for x in db.scalars(select(Category))}
+    accounts_by_name = {x.name: x.id for x in db.scalars(select(Account))}
+    warnings: list[str] = []
+    id_map: dict[int, int] = {}
+    for row in expenses_in:
+        cat_name, account_name = row.get('category_name'), row.get('account_name')
+        category_id = categories_by_name.get(cat_name) if cat_name else None
+        account_id = accounts_by_name.get(account_name) if account_name else None
+        if cat_name and category_id is None: warnings.append(f'Unknown category: {cat_name}')
+        if account_name and account_id is None: warnings.append(f'Unknown account: {account_name}')
+        x = _new_expense_from_export(row, user.id, category_id, account_id)
+        db.add(x); db.flush()
+        old_id = int(row.get('id') or 0)
+        if old_id: id_map[old_id] = x.id
+        prices = row.get('prices') or []
+        if prices:
+            for p in prices:
+                db.add(ExpensePrice(expense_id=x.id, amount=float(p.get('amount') or 0), valid_from=_date(p.get('valid_from')) or date.today(), created_at=_datetime(p.get('created_at'))))
+        else:
+            db.add(ExpensePrice(expense_id=x.id, amount=x.amount, valid_from=x.start_date or date.today()))
+
+    hidden = payload.get('hidden_catalog') or {}
+    for name in hidden.get('accounts') or []:
+        item_id = accounts_by_name.get(name)
+        if item_id: hide_catalog_item(db, user, 'account', item_id)
+    for name in hidden.get('categories') or []:
+        item_id = categories_by_name.get(name)
+        if item_id: hide_catalog_item(db, user, 'category', item_id)
+
+    pref = payload.get('preferences') or {}
+    language = pref.get('language') if pref.get('language') in {'de', 'en'} else 'de'
+    set_setting_value(db, f'preferences.language.user.{user.id}', language)
+    set_setting_value(db, f'preferences.ai_prompt.user.{user.id}', str(pref.get('ai_prompt') or (DEFAULT_AI_PROMPT_EN if language == 'en' else DEFAULT_AI_PROMPT_DE)))
+    theme = pref.get('theme') if pref.get('theme') in {'system', 'light', 'midnight', 'nordic', 'graphite', 'emerald'} else 'system'
+    set_setting_value(db, f'preferences.theme.user.{user.id}', theme)
+    try: reminder_days = min(3650, max(0, int(pref.get('cancellation_reminder_days', 30))))
+    except Exception: reminder_days = 30
+    set_setting_value(db, f'reminders.cancellation_days.user.{user.id}', str(reminder_days))
+
+    for r in payload.get('reminder_actions') or []:
+        new_expense_id = id_map.get(int(r.get('expense_id') or 0))
+        if new_expense_id:
+            db.add(ReminderAction(expense_id=new_expense_id, event_key=str(r.get('event_key') or '')[:160], action=str(r.get('action') or 'done')[:20], snooze_until=_date(r.get('snooze_until')), created_by=user.id, created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
+    db.commit()
+    return {'ok': True, 'imported_expenses': len(expenses_in), 'warnings': sorted(set(warnings))}
+
+
+@app.get('/api/export/admin')
+def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    users = list(db.scalars(select(User).order_by(User.id)))
+    accounts = list(db.scalars(select(Account).order_by(Account.id)))
+    categories = list(db.scalars(select(Category).order_by(Category.id)))
+    expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
+    return {
+        'format': 'pengucost-admin-export', 'schema_version': 1, 'app_version': APP_VERSION,
+        'exported_at': datetime.utcnow().isoformat() + 'Z',
+        'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'created_at': _iso(u.created_at)} for u in users],
+        'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note} for x in accounts],
+        'categories': [{'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color} for x in categories],
+        'hidden_catalog_items': [{'id': x.id, 'user_id': x.user_id, 'item_type': x.item_type, 'item_id': x.item_id, 'created_at': _iso(x.created_at)} for x in db.scalars(select(HiddenCatalogItem).order_by(HiddenCatalogItem.id))],
+        'expenses': [_raw_expense(x) for x in expenses],
+        'reminder_actions': [{'id': r.id, 'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_by': r.created_by, 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in db.scalars(select(ReminderAction).order_by(ReminderAction.id))],
+        'ai_profiles': [{'id': x.id, 'name': x.name, 'provider': x.provider, 'base_url': x.base_url, 'model': x.model, 'api_key': decrypt_secret(x.api_key), 'enabled': x.enabled, 'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIProfile).order_by(AIProfile.id))],
+        'settings': [{'key': x.key, 'value': x.value} for x in db.scalars(select(Setting).order_by(Setting.key))],
+    }
+
+
+@app.post('/api/import/admin')
+def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    session_admin_id = admin.id
+    if payload.get('format') != 'pengucost-admin-export':
+        raise HTTPException(400, 'Not a PenguCost admin export')
+    users_in = payload.get('users') or []
+    if not any(u.get('role') == 'admin' and u.get('is_active', True) for u in users_in):
+        raise HTTPException(400, 'Import must contain at least one active administrator')
+    # Destructive full restore. Order matters because expenses reference catalogs/users.
+    # Detach the authenticated admin object so an imported user with the same primary key can be inserted cleanly.
+    db.expunge(admin)
+    for table in ('reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
+        db.execute(text(f'DELETE FROM {table}'))
+    db.flush()
+    for u in users_in:
+        db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), created_at=_datetime(u.get('created_at'))))
+    for x in payload.get('accounts') or []:
+        db.add(Account(id=int(x['id']), name=str(x['name']), kind=str(x.get('kind') or 'bank'), note=str(x.get('note') or '')))
+    for x in payload.get('categories') or []:
+        db.add(Category(id=int(x['id']), name=str(x['name']), icon=str(x.get('icon') or 'wallet'), color=str(x.get('color') or '#5B5CF0')))
+    db.flush()
+    for row in payload.get('expenses') or []:
+        x = _new_expense_from_export(row, int(row.get('created_by')), row.get('category_id'), row.get('account_id'))
+        x.id = int(row['id']); db.add(x); db.flush()
+        for p in row.get('prices') or []:
+            db.add(ExpensePrice(id=int(p['id']), expense_id=x.id, amount=float(p.get('amount') or 0), valid_from=_date(p.get('valid_from')) or date.today(), created_at=_datetime(p.get('created_at'))))
+    for x in payload.get('hidden_catalog_items') or []:
+        db.add(HiddenCatalogItem(id=int(x['id']), user_id=int(x['user_id']), item_type=str(x['item_type']), item_id=int(x['item_id']), created_at=_datetime(x.get('created_at'))))
+    for r in payload.get('reminder_actions') or []:
+        db.add(ReminderAction(id=int(r['id']), expense_id=int(r['expense_id']), event_key=str(r.get('event_key') or ''), action=str(r.get('action') or 'done'), snooze_until=_date(r.get('snooze_until')), created_by=r.get('created_by'), created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
+    for x in payload.get('ai_profiles') or []:
+        db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
+    for x in payload.get('settings') or []:
+        db.add(Setting(key=str(x['key']), value=str(x.get('value') or '')))
+    db.commit()
+    return {'ok': True, 'users': len(users_in), 'expenses': len(payload.get('expenses') or []), 'session_user_id': session_admin_id}
+
+
 @app.get('/api/ai/providers')
 def ai_providers(_: User = Depends(current_user)):
     return AI_PROVIDERS
@@ -824,7 +1081,7 @@ async def ai_analyze(data: AIAnalyzeIn, user: User = Depends(current_user), db: 
         'expenses': rows,
     }
     try:
-        result = await analyze_costs(profile.provider, profile.base_url, decrypt_secret(profile.api_key), profile.model, summary, data.goal, data.language)
+        result = await analyze_costs(profile.provider, profile.base_url, decrypt_secret(profile.api_key), profile.model, summary, data.goal or ai_prompt_for(db, user), data.language if data.language in {'de', 'en'} else language_for(db, user))
         return {'analysis': result, 'profile': ai_profile_dict(profile, admin=False)}
     except Exception as e:
         raise HTTPException(502, f'AI request failed: {e}')

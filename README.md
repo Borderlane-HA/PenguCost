@@ -11,10 +11,13 @@ The goal is deliberately narrower than a classic budgeting app: **make recurring
 - **Contract lifecycle** — contract start, minimum term, exact/under-year contract end, cancellation deadline, notice period and configurable renewal period
 - **Actionable reminders** — notification bell with configurable lead time, done/snooze/cancel actions and automatic-renewal warnings
 - **Accounts & categories** — administrator-managed global templates; members can hide entries only for their own view
-- **Interactive analysis** — click individual subscriptions/contracts on or off; all totals and charts update immediately
+- **Interactive analysis** — all of your active costs are selected by default; click individual subscriptions/contracts on or off and all totals/charts update immediately
 - **Historical price phases** — price changes are effective from a chosen date and never rewrite past months
 - **Annual payment forecast** — chart actual expected payment months where a next due date is known, using the price valid at each payment date
 - **Multi-user privacy** — local Admin/Member accounts with strict per-user cost, contract, dashboard, reminder and AI-data isolation
+- **JSON export/import** — personal backups for each user plus a complete administrator export/restore of the whole instance
+- **German & English** — per-user language preference with an in-app switch
+- **Fast cloning** — clone an existing expense/contract and edit the copy
 - **Themes** — System, Light, Midnight, Nordic, Graphite and Emerald with flash-free theme loading
 - **Optional PenguCost AI** — admin-managed profiles for Ollama, OpenAI, Grok/xAI, Gemini, IONOS AI Model Hub, Claude and custom endpoints
 - **Local-first & offline capable** — no CDN, no telemetry, no cloud dependency for the core app
@@ -62,7 +65,7 @@ Each item can contain:
 - Cancellation acknowledgement date when a contract has actually been cancelled
 - Effective-dated price history (old prices remain immutable for past reporting)
 - Essential/non-essential marker
-- Tags and notes
+- Tags and **Notes (for AI analysis)** — describe the purpose/benefits/constraints so the model has useful context
 - Active / paused / cancelled / ended status
 
 ### Price history and contract terms
@@ -81,10 +84,18 @@ Each reminder can be handled directly:
 
 This state is stored in SQLite and therefore survives restarts and upgrades.
 
+### Export & import
+Every user can export a portable JSON file containing their own expenses/contracts, historical price phases, hidden global accounts/categories, reminder state, theme, language and saved AI-analysis prompt. Import replaces only that user's private PenguCost data; global catalogs and other users are untouched.
+
+Administrators additionally have a **complete instance export/import**. It contains users (password hashes), all user-owned expenses, global catalogs, settings and AI profiles. AI API keys are exported in a restorable form so a full export must be treated like a sensitive backup. A full import replaces the PenguCost database and is intended for restore/migration.
+
+### Languages
+PenguCost ships with German and English UI language packs. The selected language is stored per user under **Settings → Language** and follows the user across browsers after login.
+
 ### AI Analysis
 Administrators create one or more AI profiles in Settings and decide which profiles are enabled for users. Provider presets are available for **Ollama, OpenAI, Grok/xAI, Google Gemini, IONOS AI Model Hub, Claude/Anthropic and custom OpenAI-compatible endpoints**.
 
-Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. PenguCost sends only that user's currently selected cost items to the chosen profile. Example goals:
+Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. The AI page has its own cost selector and starts with **all active expenses belonging to the current user selected**. PenguCost validates ownership server-side and never adds another user's expenses to an AI payload. The per-user analysis prompt is saved and included in personal exports. The expense notes field is explicitly treated as AI context (purpose, benefits and constraints). Example goals:
 
 > I want to reduce monthly recurring costs by €80 without touching essential contracts.
 
@@ -179,16 +190,16 @@ Inside the LXC:
 From the Proxmox host, for example with LXC `103`:
 
 ```bash
-pct exec 103 -- pengucost-status
-pct exec 103 -- pengucost-backup
-pct exec 103 -- pengucost-update main
-pct exec 103 -- pengucost-update stable
+pct exec 103 -- /usr/local/sbin/pengucost-status
+pct exec 103 -- /usr/local/sbin/pengucost-backup
+pct exec 103 -- /usr/local/sbin/pengucost-update main
+pct exec 103 -- /usr/local/sbin/pengucost-update stable
 ```
 
 Restore a backup:
 
 ```bash
-pct exec 103 -- pengucost-restore /var/backups/pengucost/<backup-file>.tar.gz
+pct exec 103 -- /usr/local/sbin/pengucost-restore /var/backups/pengucost/<backup-file>.tar.gz
 ```
 
 Updates create a data backup before downloading/building the new source.
@@ -210,7 +221,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.8
+./scripts/build-offline-bundle.sh 0.1.9
 ```
 
 This creates:
@@ -232,13 +243,13 @@ pengucost-update latest
 From the Proxmox host:
 
 ```bash
-pct exec <VMID> -- pengucost-update latest
+pct exec <VMID> -- /usr/local/sbin/pengucost-update latest
 ```
 
 Or update to a specific release tag:
 
 ```bash
-pct exec <VMID> -- pengucost-update v0.2.0
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.2.0
 ```
 
 The persistent `/data` Docker volume is not replaced by an update.

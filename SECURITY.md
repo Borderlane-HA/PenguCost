@@ -13,7 +13,7 @@ PenguCost is designed primarily for private LAN/VPN deployments.
 
 ## Multi-user privacy
 
-Expenses, contracts, dashboard calculations, reminder actions and AI analysis payloads are scoped to the authenticated user. The administrator can manage user accounts and global account/category templates, but PenguCost does not provide an administrator endpoint for viewing another user's financial records.
+Expenses, contracts, dashboard calculations, reminder actions and AI analysis payloads are scoped to the authenticated user. The administrator can manage user accounts and global account/category templates. Normal application endpoints do not expose another user's financial records; the only deliberate exception is the explicit administrator full-export/full-restore feature documented below.
 
 Global accounts and categories can be hidden by a member without deleting them for other users. Only an administrator can create or globally delete these shared templates.
 
@@ -26,3 +26,8 @@ When an external provider is used, only the authenticated user's explicitly sele
 ## Reporting
 
 For a public repository, add your preferred private vulnerability-reporting contact before the first public release.
+## Export files
+
+Personal user exports contain that user's private recurring-cost and contract data. Administrator full exports are more sensitive: they contain all users' data, password hashes and AI API keys in a restorable form. Store full export JSON files like backups or secrets, do not commit them to Git, and transfer them only over trusted channels.
+
+The normal administrator UI still does not expose another user's cost data. The full export is an explicit privileged backup/restore action and should only be used by a trusted instance administrator.

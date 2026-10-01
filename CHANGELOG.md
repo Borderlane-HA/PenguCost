@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.9
+
+- Added per-user German/English language packs with a user-level language switch.
+- Added application version display below the signed-in user in the sidebar.
+- Added personal JSON export/import for expenses, price history, hidden accounts/categories, reminders, theme, language and saved AI-analysis prompt.
+- Added administrator full JSON export/import for all users, expenses, catalogs, settings and AI profiles; AI keys are exported in restorable form and the file must be treated as sensitive.
+- Added expense cloning from the Costs & Contracts table.
+- Removed example placeholders from the new-expense form.
+- Renamed notes to “Notes (for AI analysis)” / “Notizen (für KI-Analyse)” and explicitly instructs the AI to use this context when evaluating a cost.
+- Fixed dashboard selection so every active expense belonging to the current user is selected after a full refresh.
+- AI Analysis now has its own per-analysis cost selector, defaults to all active expenses for the current user and remains strictly user-isolated server-side.
+- Added persistent per-user AI prompt storage so it is included in user exports.
+- Updated Proxmox management examples to use absolute helper paths under `/usr/local/sbin`.
+
 ## 0.1.8
 
 ### Fixed
