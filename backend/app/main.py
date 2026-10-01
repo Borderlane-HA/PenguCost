@@ -15,12 +15,12 @@ from sqlalchemy.orm import Session
 from .db import Base, engine, get_db, SessionLocal
 from .models import (
     User, Expense, ExpensePrice, Account, Category, Setting, ReminderAction,
-    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain,
+    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange,
 )
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.3.1'
+APP_VERSION = '0.4.0'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -37,6 +37,16 @@ def migrate_schema():
         statements.append('ALTER TABLE expenses ADD COLUMN renewal_period_months INTEGER')
     if 'cancelled_on' not in columns:
         statements.append('ALTER TABLE expenses ADD COLUMN cancelled_on DATE')
+    if 'renewal_amount' not in columns:
+        statements.append('ALTER TABLE expenses ADD COLUMN renewal_amount FLOAT')
+    if 'recurrence_type' not in columns:
+        statements.append("ALTER TABLE expenses ADD COLUMN recurrence_type VARCHAR(16) DEFAULT 'recurring'")
+    if 'amount_estimated' not in columns:
+        statements.append('ALTER TABLE expenses ADD COLUMN amount_estimated BOOLEAN DEFAULT 0')
+    if 'contract_url' not in columns:
+        statements.append("ALTER TABLE expenses ADD COLUMN contract_url VARCHAR(500) DEFAULT ''")
+    if 'contract_reference' not in columns:
+        statements.append("ALTER TABLE expenses ADD COLUMN contract_reference VARCHAR(160) DEFAULT ''")
     if statements:
         with engine.begin() as conn:
             for statement in statements:
@@ -135,10 +145,15 @@ class ExpenseIn(BaseModel):
     cancellation_date: Optional[date] = None
     minimum_term_months: Optional[int] = Field(default=None, ge=1)
     renewal_period_months: Optional[int] = Field(default=None, ge=1)
+    renewal_amount: Optional[float] = Field(default=None, gt=0)
     cancellation_notice_days: Optional[int] = None
     auto_renew: bool = False
     status: str = 'active'
     essential: bool = False
+    recurrence_type: Literal['recurring', 'one_time'] = 'recurring'
+    amount_estimated: bool = False
+    contract_url: str = ''
+    contract_reference: str = ''
     tags: str = ''
     notes: str = ''
     price_effective_from: Optional[date] = None
@@ -262,8 +277,13 @@ def expense_dict(x: Expense, as_of: date | None = None):
     today = as_of or date.today()
     current_amount = price_at(x, today)
     months = x.interval_months or {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}.get(x.billing_interval, 1)
-    monthly = round(current_amount / months, 2)
-    yearly = round(monthly * 12, 2)
+    if (x.recurrence_type or 'recurring') == 'one_time':
+        due = x.next_due_date or x.start_date
+        monthly = round(current_amount if due and due.year == today.year and due.month == today.month else 0, 2)
+        yearly = round(current_amount if due and due.year == today.year else 0, 2)
+    else:
+        monthly = round(current_amount / months, 2)
+        yearly = round(monthly * 12, 2)
     prices = sorted(x.prices, key=lambda p: p.valid_from)
     price_history = []
     for i, p in enumerate(prices):
@@ -282,8 +302,10 @@ def expense_dict(x: Expense, as_of: date | None = None):
         'account': x.account.name if x.account else None, 'start_date': x.start_date, 'next_due_date': x.next_due_date,
         'contract_end': x.contract_end, 'effective_contract_end': next_end, 'cancellation_date': x.cancellation_date,
         'effective_cancellation_date': next_cancel, 'minimum_term_months': x.minimum_term_months,
-        'renewal_period_months': x.renewal_period_months, 'cancellation_notice_days': x.cancellation_notice_days,
+        'renewal_period_months': x.renewal_period_months, 'renewal_amount': x.renewal_amount, 'cancellation_notice_days': x.cancellation_notice_days,
         'cancelled_on': x.cancelled_on, 'auto_renew': x.auto_renew, 'status': x.status, 'essential': x.essential,
+        'recurrence_type': x.recurrence_type or 'recurring', 'amount_estimated': bool(x.amount_estimated),
+        'contract_url': x.contract_url or '', 'contract_reference': x.contract_reference or '',
         'tags': x.tags, 'notes': x.notes, 'price_history': price_history,
         'next_price_change': ({'amount': upcoming_price.amount, 'valid_from': upcoming_price.valid_from} if upcoming_price else None),
     }
@@ -634,6 +656,7 @@ def update_expense(item_id: int, data: ExpenseIn, user: User = Depends(current_u
     if (payload.get('contract_end') != old_contract_end and data.cancellation_date == old_cancellation_date
             and payload.get('contract_end') and payload.get('cancellation_notice_days') is not None):
         payload['cancellation_date'] = payload['contract_end'] - timedelta(days=max(0, payload['cancellation_notice_days']))
+    before = expense_dict(x)
     requested_amount = payload.pop('amount')
     effective = data.price_effective_from or date.today()
     if round(price_at(x, effective), 2) != round(requested_amount, 2):
@@ -643,6 +666,10 @@ def update_expense(item_id: int, data: ExpenseIn, user: User = Depends(current_u
     if x.auto_renew and x.cancelled_on is not None:
         x.cancelled_on = None
     x.amount = price_at(x, date.today())
+    after_preview = {**before, **payload, 'amount': requested_amount}
+    changes = {k: {'from': before.get(k), 'to': after_preview.get(k)} for k in after_preview if k in before and before.get(k) != after_preview.get(k)}
+    if changes:
+        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='updated', changes_json=json.dumps(changes, default=str, ensure_ascii=False)))
     db.commit()
     db.refresh(x)
     return expense_dict(x)
@@ -663,11 +690,11 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
     clone = Expense(
         name=(source.name + suffix)[:160], provider=source.provider, entry_type=(source.entry_type or 'expense'), amount=source.amount, currency=source.currency,
         billing_interval=source.billing_interval, interval_months=source.interval_months,
-        minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months,
+        minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months, renewal_amount=source.renewal_amount,
         category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
         next_due_date=source.next_due_date, contract_end=source.contract_end, cancellation_date=source.cancellation_date,
         cancellation_notice_days=source.cancellation_notice_days, cancelled_on=None, auto_renew=source.auto_renew,
-        status='active', essential=source.essential, tags=source.tags, notes=source.notes, created_by=user.id,
+        status='active', essential=source.essential, recurrence_type=source.recurrence_type, amount_estimated=source.amount_estimated, contract_url=source.contract_url, contract_reference=source.contract_reference, tags=source.tags, notes=source.notes, created_by=user.id,
     )
     db.add(clone)
     db.flush()
@@ -676,6 +703,40 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
     db.commit()
     db.refresh(clone)
     return expense_dict(clone)
+
+
+class BulkExpenseIn(BaseModel):
+    ids: list[int] = []
+    action: Literal['delete','status','category','account']
+    value: Optional[Any] = None
+
+
+@app.post('/api/expenses/bulk')
+def bulk_expenses(data: BulkExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = list(db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.id.in_(data.ids))))
+    changed = 0
+    for x in rows:
+        if data.action == 'delete':
+            db.delete(x)
+            changed += 1
+            continue
+        if data.action == 'status':
+            x.status = str(data.value or 'active')
+        elif data.action == 'category':
+            x.category_id = int(data.value) if data.value not in (None, '') else None
+        elif data.action == 'account':
+            x.account_id = int(data.value) if data.value not in (None, '') else None
+        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action=f'bulk_{data.action}', changes_json=json.dumps({'value': data.value}, ensure_ascii=False)))
+        changed += 1
+    db.commit()
+    return {'ok': True, 'changed': changed}
+
+
+@app.get('/api/expenses/{item_id}/history')
+def expense_history(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    owned_expense(db, user, item_id)
+    rows = db.scalars(select(ExpenseChange).where(ExpenseChange.expense_id == item_id).order_by(ExpenseChange.created_at.desc(), ExpenseChange.id.desc()))
+    return [{'id': x.id, 'action': x.action, 'changes': json.loads(x.changes_json or '{}'), 'created_at': x.created_at.isoformat()} for x in rows]
 
 
 @app.get('/api/dashboard')
@@ -863,13 +924,14 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
     return {
         'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': x.amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': x.interval_months,
-        'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months,
+        'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months, 'renewal_amount': x.renewal_amount,
         'category_id': x.category_id, 'category_name': x.category.name if x.category else None,
         'account_id': x.account_id, 'account_name': x.account.name if x.account else None,
         'start_date': _iso(x.start_date), 'next_due_date': _iso(x.next_due_date),
         'contract_end': _iso(x.contract_end), 'cancellation_date': _iso(x.cancellation_date),
         'cancellation_notice_days': x.cancellation_notice_days, 'cancelled_on': _iso(x.cancelled_on),
         'auto_renew': x.auto_renew, 'status': x.status, 'essential': x.essential,
+        'recurrence_type': x.recurrence_type or 'recurring', 'amount_estimated': bool(x.amount_estimated), 'contract_url': x.contract_url or '', 'contract_reference': x.contract_reference or '',
         'tags': x.tags, 'notes': x.notes, 'created_by': x.created_by,
         'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at),
         'prices': [{'id': p.id, 'amount': p.amount, 'valid_from': _iso(p.valid_from), 'created_at': _iso(p.created_at)} for p in x.prices],
@@ -882,12 +944,12 @@ def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, a
         entry_type=('income' if row.get('entry_type') == 'income' else 'expense'),
         amount=float(row.get('amount') or 0), currency=str(row.get('currency') or 'EUR')[:8],
         billing_interval=str(row.get('billing_interval') or 'monthly')[:20], interval_months=max(1, int(row.get('interval_months') or 1)),
-        minimum_term_months=row.get('minimum_term_months'), renewal_period_months=row.get('renewal_period_months'),
+        minimum_term_months=row.get('minimum_term_months'), renewal_period_months=row.get('renewal_period_months'), renewal_amount=row.get('renewal_amount'),
         category_id=category_id, account_id=account_id, start_date=_date(row.get('start_date')), next_due_date=_date(row.get('next_due_date')),
         contract_end=_date(row.get('contract_end')), cancellation_date=_date(row.get('cancellation_date')),
         cancellation_notice_days=row.get('cancellation_notice_days'), cancelled_on=_date(row.get('cancelled_on')),
         auto_renew=bool(row.get('auto_renew', False)), status=str(row.get('status') or 'active')[:20],
-        essential=bool(row.get('essential', False)), tags=str(row.get('tags') or '')[:255], notes=str(row.get('notes') or ''),
+        essential=bool(row.get('essential', False)), recurrence_type=('one_time' if row.get('recurrence_type') == 'one_time' else 'recurring'), amount_estimated=bool(row.get('amount_estimated', False)), contract_url=str(row.get('contract_url') or '')[:500], contract_reference=str(row.get('contract_reference') or '')[:160], tags=str(row.get('tags') or '')[:255], notes=str(row.get('notes') or ''),
         created_by=user_id, created_at=_datetime(row.get('created_at')), updated_at=_datetime(row.get('updated_at')),
     )
 
@@ -908,7 +970,7 @@ def export_user_data(user: User = Depends(current_user), db: Session = Depends(g
     conversations = list(db.scalars(select(AIConversation).where(AIConversation.user_id == user.id).order_by(AIConversation.id)))
     brain = db.get(AIBrain, user.id)
     return {
-        'format': 'pengucost-user-export', 'schema_version': 2, 'app_version': APP_VERSION,
+        'format': 'pengucost-user-export', 'schema_version': 3, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'user': {'username': user.username, 'display_name': user.display_name},
         'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
@@ -1005,7 +1067,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     categories = list(db.scalars(select(Category).order_by(Category.id)))
     expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
     return {
-        'format': 'pengucost-admin-export', 'schema_version': 2, 'app_version': APP_VERSION,
+        'format': 'pengucost-admin-export', 'schema_version': 3, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'created_at': _iso(u.created_at)} for u in users],
         'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note} for x in accounts],
@@ -1181,6 +1243,9 @@ def _ai_finance_payload(db: Session, user_id: int, requested_ids: list[int]) -> 
 
 
 def _update_brain_memory(db: Session, user_id: int, mode: str, target: float | None, user_message: str, assistant_message: str):
+    cues = ('merk', 'wichtig', 'nicht anfassen', 'behalten', 'ziel', 'priorität', 'essential', 'remember', 'important', 'keep', 'goal', 'priority')
+    if mode != 'savings' and not any(c in user_message.lower() for c in cues):
+        return
     row = db.get(AIBrain, user_id)
     if not row:
         row = AIBrain(user_id=user_id, summary='')

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- Added Excel-style sorting and per-column filters for income and expenses.
+- Added saved table views, configurable columns and bulk actions.
+- Added optional renewal prices for automatic contract renewals and forecast calculations.
+- Added direct category creation from the entry form for administrators.
+- Fixed the dashboard year picker being clipped by the hero panel.
+- Added previous-year comparison and explainable forecast drivers to the dashboard.
+- Added recurring vs. one-time entries, estimated amounts, contract/customer references and portal URLs.
+- Added duplicate warnings and per-entry change history.
+- Improved the PenguCost AI Agent with stronger finance prompts, contextual quick questions, global background-job status and more selective Brain memory.
+- Added a new README hero image and refreshed documentation.
+
 ## 0.3.1
 
 - Fix AI Agent compatibility with local/Ollama chat templates that could ignore FINANCE_DATA_JSON when it was sent in an earlier conversation turn.

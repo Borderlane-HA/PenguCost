@@ -53,6 +53,7 @@ class Expense(Base):
     interval_months: Mapped[int] = mapped_column(Integer, default=1)
     minimum_term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     renewal_period_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    renewal_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     category_id: Mapped[int | None] = mapped_column(ForeignKey('categories.id'), nullable=True)
     account_id: Mapped[int | None] = mapped_column(ForeignKey('accounts.id'), nullable=True)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -64,6 +65,10 @@ class Expense(Base):
     auto_renew: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default='active')
     essential: Mapped[bool] = mapped_column(Boolean, default=False)
+    recurrence_type: Mapped[str] = mapped_column(String(16), default='recurring')
+    amount_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+    contract_url: Mapped[str] = mapped_column(String(500), default='')
+    contract_reference: Mapped[str] = mapped_column(String(160), default='')
     tags: Mapped[str] = mapped_column(String(255), default='')
     notes: Mapped[str] = mapped_column(Text, default='')
     created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
@@ -84,6 +89,16 @@ class ExpensePrice(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     expense = relationship(Expense, back_populates='prices')
+
+
+class ExpenseChange(Base):
+    __tablename__ = 'expense_changes'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    expense_id: Mapped[int] = mapped_column(ForeignKey('expenses.id'), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(32), default='updated')
+    changes_json: Mapped[str] = mapped_column(Text, default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 class ReminderAction(Base):
