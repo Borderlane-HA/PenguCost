@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8
+
+- Dashboard values are now month-focused: clicking a month in the income-vs-expenses chart updates all KPI cards, category charts, contract counts and monthly date information to that point in time.
+- Added **Current month** next to the year picker to jump back to the current year and month at any time.
+- The selected month is highlighted in the yearly chart while the full year stays visible for navigation.
+- Added **Top 10 expenses** and **Top 10 income** for the selected month, sorted from highest to lowest.
+- Category donuts now always reflect the selected month instead of an annual average.
+- Reworked **Included in analysis** into a compact summary with a searchable/filterable selection popover, keeping per-entry inclusion without consuming large dashboard space.
+- The current-year graph now considers all entries relevant during the year, so contracts that ended earlier in the year can still appear in their historical months.
+- Cancellation and contract-end cards follow the selected month.
+
 ## 0.4.7
 
 - Added pagination to **Income & Expenses** with 15 rows per page by default and 50 / 100 / All options.
