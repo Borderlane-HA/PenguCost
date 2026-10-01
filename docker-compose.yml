@@ -1,0 +1,21 @@
+services:
+  pengucost:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: pengucost:local
+    container_name: pengucost
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - pengucost_data:/data
+    environment:
+      - TZ=Europe/Berlin
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  pengucost_data:

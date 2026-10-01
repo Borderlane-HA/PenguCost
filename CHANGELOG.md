@@ -1,0 +1,46 @@
+# Changelog
+
+## 0.1.3
+- Added persistent reminder actions: Done, Remind later, and Contract cancelled.
+- Added snooze presets for 1/3/7/14/30 days with deadline capping.
+- Added two-step confirmation before marking a contract as cancelled.
+- Contract cancellation now freezes the current effective term, disables auto-renewal, records the cancellation date, and keeps costs active until term end.
+- Added per-reminder event keys so completed reminders can return correctly for later renewal cycles.
+- Current dashboard/AI totals now exclude effectively expired non-renewing contracts.
+- Added automatic in-place migration from 0.1.2 for cancellation acknowledgement and reminder state storage.
+
+## 0.1.2
+- Added configurable colors for all cost categories.
+- Category colors are now used in the dashboard donut chart and category badges.
+- Added configurable cancellation reminder lead time in Settings.
+- Added notification bell with reminder count and a contract reminder center.
+- Added separate reminder states for cancellation deadlines, imminent automatic renewals, and already renewed contracts.
+- Improved cancellation notice input with common presets plus a custom-day option.
+- Added automatic in-place migration from 0.1.1 for the new category color field.
+
+## 0.1.1
+
+- Added effective-dated price history; changing a subscription price no longer rewrites historical periods
+- Added support for scheduled future price changes
+- Added minimum contract term in months and automatic contract-end calculation
+- Added configurable auto-renewal periods in months
+- Added effective upcoming contract/cancellation dates for renewed contracts
+- Updated annual payment forecast to use the price valid on each payment date
+- Added in-place SQLite migration from 0.1.0 and automatic seeding of existing prices into history
+
+## 0.1.0
+
+Initial PenguCost foundation:
+- Recurring expense and contract management
+- Monthly/yearly normalization
+- Contract and cancellation dates
+- Account and category assignment
+- Interactive dashboard filtering
+- Annual payment forecast
+- Multi-user local authentication
+- Six themes
+- Optional OpenAI-compatible AI analysis
+- Docker deployment
+- Proxmox VE 8/9 installer
+- Offline release bundle workflow
+- Backup and restore scripts
