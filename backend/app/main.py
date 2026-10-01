@@ -28,7 +28,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.6'
+APP_VERSION = '0.4.7'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -1100,8 +1100,11 @@ def _download_provider_icon(item: dict, source: str, force: bool = False) -> boo
     candidates = []
     if source in {'auto','simpleicons'} and item.get('slug'):
         candidates.append(('svg', f"https://cdn.simpleicons.org/{item['slug']}"))
-    if source in {'auto','favicons'} and item.get('domain'):
-        candidates.append(('png', f"https://www.google.com/s2/favicons?domain={item['domain']}&sz=128"))
+    # A website favicon is also the fallback for Simple Icons. Some brands do not
+    # publish a Simple Icons asset (or remove it later), while the official site
+    # still exposes a reliable brand favicon.
+    if item.get('domain') and source in {'auto','favicons','simpleicons'}:
+        candidates.append(('png', f"https://www.google.com/s2/favicons?sz=128&domain_url=https://{item['domain']}"))
     for ext, url in candidates:
         try:
             req = urllib.request.Request(url, headers={'User-Agent':f'PenguCost/{APP_VERSION}'})
@@ -1180,14 +1183,17 @@ def clear_provider_icons(_: User = Depends(require_admin), db: Session = Depends
     return _provider_icon_status(db)
 
 @app.get('/api/provider-icons/resolve')
-def resolve_provider_icon(provider: str = Query(default=''), website: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def resolve_provider_icon(background_tasks: BackgroundTasks, provider: str = Query(default=''), website: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
     if setting_value(db, 'provider_icons.enabled', 'false') != 'true':
-        return {'url': None, 'key': None}
+        return {'url': None, 'key': None, 'mtime': None}
     item = _provider_icon_item(provider, website)
     if not item:
-        return {'url': None, 'key': None}
+        return {'url': None, 'key': None, 'mtime': None}
     path = _provider_icon_path(item['key'])
-    return {'url': f'/provider-icons/{path.name}' if path else None, 'key': item['key']}
+    source = setting_value(db, 'provider_icons.source', 'auto') or 'auto'
+    if not path or not _icon_is_fresh(item['key']):
+        background_tasks.add_task(_refresh_provider_icon_for, provider or '', website or '', source)
+    return {'url': f'/provider-icons/{path.name}' if path else None, 'key': item['key'], 'mtime': int(path.stat().st_mtime) if path else None}
 
 
 _PROVIDER_REFRESH_THREAD_STARTED = False

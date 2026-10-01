@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.7
+
+- Added pagination to **Income & Expenses** with 15 rows per page by default and 50 / 100 / All options.
+- Filters, saved views and sorting now stay active across page changes; changing filters or sorting returns to page 1.
+- Select-all now applies to the currently visible page instead of unexpectedly selecting hidden pages.
+- Refined provider logos: downloaded logos render without the old surrounding tile, while fallback initials are precisely centered in a lighter modern monogram.
+- Provider icon resolution now triggers a background refresh when an icon is missing or stale and retries in the UI, improving newly added websites such as Amazon.
+- Website favicon lookups now use the provider website through Google's favicon service when a branded icon is unavailable.
+
 ## 0.4.6
 
 - Fix the TypeScript production build in the cloned-cancellation deadline logic (`TS2367`).
