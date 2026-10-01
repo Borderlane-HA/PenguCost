@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3
+
+- Reworked the New/Edit Entry dialog around a compact core form with collapsible Contract & Term, Renewal & Cancellation, More Details and AI Context sections.
+- Moved price history out of the main form flow; historical phases are now shown only in a collapsed detail section and only when history actually exists.
+- Price edits now create a new dated price phase without visually overwhelming normal entry editing.
+- Kept optional renewal pricing for automatic renewals and grouped it with renewal/cancellation settings.
+- Added inline private category and account/payment-method creation with compact + controls directly in the entry editor.
+- Shortened the sidebar label back to **Accounts & Categories / Konten & Rubriken** while keeping the full catalog title on the page.
+- Added optional administrator-controlled provider/brand icons with a local cache. External downloads are off by default and can be enabled/refreshed from Settings.
+- Added provider icon matching for common services such as Apple, Spotify, Netflix, Amazon, OpenAI/ChatGPT, Telekom, ADAC, Microsoft, Adobe, Dropbox, GitHub, PayPal and others.
+- Provider icons are rendered in provider fields and entry lists, with the existing letter avatar as an offline fallback.
+- Added validation hints for inconsistent contract dates (active but already ended, or contract end before next due date).
+
 ## 0.4.2
 
 - Added self-service password changes under Settings for every user.

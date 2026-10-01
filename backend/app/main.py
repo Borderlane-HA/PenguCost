@@ -2,6 +2,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
 import json
+import re
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Literal, Any
 
@@ -12,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func, inspect, text
 from sqlalchemy.orm import Session
 
-from .db import Base, engine, get_db, SessionLocal
+from .db import Base, engine, get_db, SessionLocal, DATA_DIR
 from .models import (
     User, Expense, ExpensePrice, Account, Category, Setting, ReminderAction,
     HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange,
@@ -20,7 +23,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.2'
+APP_VERSION = '0.4.3'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -109,6 +112,45 @@ AI_PROVIDERS = [
     {'id': 'custom', 'label': 'OpenAI-kompatibel / Custom', 'default_base_url': '', 'key_optional': True},
 ]
 PROVIDER_MAP = {x['id']: x for x in AI_PROVIDERS}
+
+PROVIDER_ICON_DIR = DATA_DIR / 'provider-icons'
+PROVIDER_ICON_DIR.mkdir(parents=True, exist_ok=True)
+PROVIDER_ICON_CATALOG = [
+    {'key':'apple','aliases':['apple','apple one','icloud','apple music'],'slug':'apple','domain':'apple.com'},
+    {'key':'spotify','aliases':['spotify'],'slug':'spotify','domain':'spotify.com'},
+    {'key':'netflix','aliases':['netflix'],'slug':'netflix','domain':'netflix.com'},
+    {'key':'amazon','aliases':['amazon','amazon prime','prime'],'slug':'amazon','domain':'amazon.de'},
+    {'key':'openai','aliases':['openai','chatgpt'],'slug':'openai','domain':'openai.com'},
+    {'key':'telekom','aliases':['telekom','deutsche telekom','magenta'],'slug':'deutschetelekom','domain':'telekom.de'},
+    {'key':'adac','aliases':['adac'],'slug':'adac','domain':'adac.de'},
+    {'key':'microsoft','aliases':['microsoft','microsoft 365','office 365'],'slug':'microsoft','domain':'microsoft.com'},
+    {'key':'adobe','aliases':['adobe','creative cloud'],'slug':'adobe','domain':'adobe.com'},
+    {'key':'dropbox','aliases':['dropbox'],'slug':'dropbox','domain':'dropbox.com'},
+    {'key':'github','aliases':['github'],'slug':'github','domain':'github.com'},
+    {'key':'paypal','aliases':['paypal'],'slug':'paypal','domain':'paypal.com'},
+    {'key':'vodafone','aliases':['vodafone'],'slug':'vodafone','domain':'vodafone.de'},
+    {'key':'o2','aliases':['o2','telefonica'],'slug':'o2','domain':'o2online.de'},
+    {'key':'disney','aliases':['disney','disney+','disney plus'],'slug':'disneyplus','domain':'disneyplus.com'},
+    {'key':'sky','aliases':['sky','sky q'],'slug':'sky','domain':'sky.de'},
+    {'key':'spotify','aliases':['spotify premium'],'slug':'spotify','domain':'spotify.com'},
+    {'key':'ionos','aliases':['ionos'],'slug':'ionos','domain':'ionos.de'},
+]
+
+def _provider_key(value: str) -> str | None:
+    text = re.sub(r'[^a-z0-9+]+', ' ', (value or '').lower()).strip()
+    if not text:
+        return None
+    for item in PROVIDER_ICON_CATALOG:
+        if any(alias in text for alias in item['aliases']):
+            return item['key']
+    return None
+
+def _provider_icon_path(key: str) -> Path | None:
+    for ext in ('svg','png'):
+        candidate = PROVIDER_ICON_DIR / f'{key}.{ext}'
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def seed(db: Session):
@@ -233,6 +275,11 @@ class UserPreferencesIn(BaseModel):
     language: Optional[Literal['de', 'en']] = None
     ai_prompt: Optional[str] = Field(default=None, max_length=6000)
     theme: Optional[Literal['system', 'light', 'midnight', 'nordic', 'graphite', 'emerald']] = None
+
+
+class ProviderIconSettingsIn(BaseModel):
+    enabled: bool = False
+    source: Literal['auto', 'simpleicons', 'favicons'] = 'auto'
 
 
 class ReminderActionIn(BaseModel):
@@ -957,6 +1004,82 @@ def save_user_preferences(data: UserPreferencesIn, user: User = Depends(current_
     return {'ok': True, 'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user)}
 
 
+def _provider_icon_status(db: Session) -> dict:
+    return {
+        'enabled': setting_value(db, 'provider_icons.enabled', 'false') == 'true',
+        'source': setting_value(db, 'provider_icons.source', 'auto') or 'auto',
+        'cached': len(list(PROVIDER_ICON_DIR.glob('*.svg'))) + len(list(PROVIDER_ICON_DIR.glob('*.png'))),
+        'available': len({x['key'] for x in PROVIDER_ICON_CATALOG}),
+    }
+
+@app.get('/api/settings/provider-icons')
+def provider_icon_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return _provider_icon_status(db)
+
+@app.put('/api/settings/provider-icons')
+def save_provider_icon_settings(data: ProviderIconSettingsIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
+    set_setting_value(db, 'provider_icons.enabled', 'true' if data.enabled else 'false')
+    set_setting_value(db, 'provider_icons.source', data.source)
+    db.commit()
+    return _provider_icon_status(db)
+
+def _download_provider_icon(item: dict, source: str) -> bool:
+    candidates = []
+    if source in {'auto','simpleicons'} and item.get('slug'):
+        candidates.append(('svg', f"https://cdn.simpleicons.org/{item['slug']}"))
+    if source in {'auto','favicons'} and item.get('domain'):
+        candidates.append(('png', f"https://www.google.com/s2/favicons?domain={item['domain']}&sz=128"))
+    for ext, url in candidates:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent':'PenguCost/0.4.3'})
+            with urllib.request.urlopen(req, timeout=6) as response:
+                data = response.read(1_000_000)
+            if not data:
+                continue
+            if ext == 'svg' and b'<svg' not in data[:1000].lower():
+                continue
+            target = PROVIDER_ICON_DIR / f"{item['key']}.{ext}"
+            tmp = target.with_suffix(target.suffix + '.tmp')
+            tmp.write_bytes(data); tmp.replace(target)
+            other = PROVIDER_ICON_DIR / f"{item['key']}.{'png' if ext=='svg' else 'svg'}"
+            if other.exists(): other.unlink()
+            return True
+        except Exception:
+            continue
+    return False
+
+@app.post('/api/settings/provider-icons/refresh')
+def refresh_provider_icons(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    status = _provider_icon_status(db)
+    if not status['enabled']:
+        raise HTTPException(400, 'External provider icons are disabled')
+    source = status['source'] if status['source'] in {'auto','simpleicons','favicons'} else 'auto'
+    unique = {x['key']:x for x in PROVIDER_ICON_CATALOG}.values()
+    refreshed = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(_download_provider_icon, item, source) for item in unique]
+        for future in as_completed(futures):
+            if future.result(): refreshed += 1
+    return {**_provider_icon_status(db), 'refreshed': refreshed}
+
+@app.delete('/api/settings/provider-icons/cache')
+def clear_provider_icons(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    for pattern in ('*.svg','*.png'):
+        for file in PROVIDER_ICON_DIR.glob(pattern):
+            file.unlink(missing_ok=True)
+    return _provider_icon_status(db)
+
+@app.get('/api/provider-icons/resolve')
+def resolve_provider_icon(provider: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if setting_value(db, 'provider_icons.enabled', 'false') != 'true':
+        return {'url': None, 'key': None}
+    key = _provider_key(provider)
+    if not key:
+        return {'url': None, 'key': None}
+    path = _provider_icon_path(key)
+    return {'url': f'/provider-icons/{path.name}' if path else None, 'key': key}
+
+
 def reminder_event(x: Expense, today: date, days: int):
     until = today + timedelta(days=days)
     row = expense_dict(x, today)
@@ -1592,6 +1715,9 @@ async def ai_analyze(data: AIAnalyzeIn, user: User = Depends(current_user), db: 
     except Exception as e:
         raise HTTPException(502, f'AI request failed: {e}')
 
+
+PROVIDER_ICON_DIR.mkdir(parents=True, exist_ok=True)
+app.mount('/provider-icons', StaticFiles(directory=PROVIDER_ICON_DIR), name='provider-icons')
 
 STATIC_DIR = Path(__file__).parent / 'static'
 if STATIC_DIR.exists():

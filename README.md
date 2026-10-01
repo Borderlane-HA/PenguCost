@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.2
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.3
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards.
@@ -169,6 +169,7 @@ docker ps --filter name=pengucost
 - personal JSON export/import plus complete administrator backup/restore
 - Excel-style sorting/filtering, saved views, configurable columns and bulk actions
 - contract/customer links, duplicate warnings, tags, estimates and change history
+- optional provider/brand icons downloaded on demand and cached locally
 - German and English UI
 - multiple themes
 - persistent **PenguCost AI Agent** with chat history, Brain memory and admin-managed AI profiles
@@ -176,7 +177,7 @@ docker ps --filter name=pengucost
 
 ## Data & privacy
 
-PenguCost is **local-first**. Core operation does not require Internet access after installation. Internet is only needed for updates and optional external AI providers.
+PenguCost is **local-first**. Core operation does not require Internet access after installation. Internet is only needed for updates, optional external AI providers and an optional manual refresh of provider/brand icons.
 
 Each user's financial data, reminders, AI history and Brain are isolated from other users. Administrators manage shared configuration and AI profiles but do not browse other users' financial data through the normal UI.
 
