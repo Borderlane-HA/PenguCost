@@ -20,7 +20,7 @@ BRIDGE="${BRIDGE:-vmbr0}"
 CORES="${CORES:-2}"
 MEMORY="${MEMORY:-2048}"
 SWAP="${SWAP:-512}"
-DISK="${DISK:-8}"
+DISK="${DISK:-16}"
 APP_PORT="${APP_PORT:-8080}"
 NETWORK_MODE="${NETWORK_MODE:-dhcp}"
 STATIC_IP="${STATIC_IP:-}"
@@ -180,7 +180,7 @@ advanced_setup() {
     2) INSTALL_CHANNEL="stable" ;;
     3)
       INSTALL_CHANNEL="tag"
-      EXACT_TAG="$(prompt 'Tag (example v0.4.8)' "$EXACT_TAG")"
+      EXACT_TAG="$(prompt 'Tag (example v0.4.9)' "$EXACT_TAG")"
       ;;
     *) fail "Invalid source selection."; exit 1 ;;
   esac
@@ -425,67 +425,20 @@ set -Eeuo pipefail
 exec bash /opt/pengucost-src/scripts/restore.sh "$1"
 RESTORE
 
-cat > "$TMPDIR/pengucost-update" <<'UPDATE'
+cat > "$TMPDIR/pengucost-update" <<UPDATE
 #!/usr/bin/env bash
 set -Eeuo pipefail
-REPO='__REPO__'
-PORT='__PORT__'
-TARGET="${1:-main}"
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
-if [[ "$TARGET" == latest || "$TARGET" == stable ]]; then
-  TARGET=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
-  if [[ -z "$TARGET" ]]; then
-    TARGET=$(curl -fsSL "https://api.github.com/repos/${REPO}/tags?per_page=1" | grep -m1 '"name"' | cut -d '"' -f4 || true)
-  fi
-  [[ -n "$TARGET" ]] || { echo 'Could not resolve latest release/tag.' >&2; exit 1; }
-  URL="https://github.com/${REPO}/archive/refs/tags/${TARGET}.tar.gz"
-elif [[ "$TARGET" == main ]]; then
-  URL="https://github.com/${REPO}/archive/refs/heads/main.tar.gz"
-else
-  URL="https://github.com/${REPO}/archive/refs/tags/${TARGET}.tar.gz"
-fi
-
-mkdir -p /var/backups/pengucost
-BACKUP="/var/backups/pengucost/pengucost-preupdate-$(date +%Y%m%d-%H%M%S).tar.gz"
-bash /opt/pengucost-src/scripts/backup.sh "$BACKUP"
-echo "Backup: $BACKUP"
-
-curl -fL --retry 2 "$URL" -o "$TMP/source.tar.gz"
-mkdir -p "$TMP/source"
-tar xzf "$TMP/source.tar.gz" -C "$TMP/source" --strip-components=1
-SAFE=$(printf '%s' "$TARGET" | tr -cs 'A-Za-z0-9_.-' '-')
-IMAGE="pengucost:${SAFE}"
-OLD_IMAGE=$(awk '$1=="image:" {print $2; exit}' /opt/pengucost/compose.yml)
-
-cd "$TMP/source"
-docker build -f backend/Dockerfile -t "$IMAGE" .
-sed -i "s#^[[:space:]]*image:.*#    image: ${IMAGE}#" /opt/pengucost/compose.yml
-cd /opt/pengucost
-if docker compose version >/dev/null 2>&1; then docker compose up -d; else docker-compose up -d; fi
-
-for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
-    rm -rf /opt/pengucost-src
-    mv "$TMP/source" /opt/pengucost-src
-    printf '%s\n' "$TARGET" > /opt/pengucost/installed-version
-    echo "PenguCost updated to $TARGET"
-    exit 0
-  fi
-  sleep 2
-done
-
-echo 'Health check failed after update; restoring previous image reference.' >&2
-if [[ -n "$OLD_IMAGE" ]]; then
-  sed -i "s#^[[:space:]]*image:.*#    image: ${OLD_IMAGE}#" /opt/pengucost/compose.yml
-  cd /opt/pengucost
-  if docker compose version >/dev/null 2>&1; then docker compose up -d; else docker-compose up -d; fi
-fi
-echo "Data backup kept at: $BACKUP" >&2
-exit 1
+export PENGUCOST_REPO='${REPO}'
+export PENGUCOST_PORT='${APP_PORT}'
+exec bash /opt/pengucost-src/scripts/pengucost-update.sh "\$@"
 UPDATE
-sed -i "s#__REPO__#${REPO}#g; s#__PORT__#${APP_PORT}#g" "$TMPDIR/pengucost-update"
+
+cat > "$TMPDIR/pengucost-maintenance.env" <<ENV
+PENGUCOST_REPO='${REPO}'
+PENGUCOST_PORT='${APP_PORT}'
+ENV
+pct push "$VMID" "$TMPDIR/pengucost-maintenance.env" /etc/pengucost-maintenance.env
+pct exec "$VMID" -- chmod 0644 /etc/pengucost-maintenance.env
 
 for helper in pengucost-status pengucost-backup pengucost-restore pengucost-update; do
   pct push "$VMID" "$TMPDIR/$helper" "/usr/local/sbin/$helper"

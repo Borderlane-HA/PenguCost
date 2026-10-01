@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.9
+
+- Moved the **All / Expenses / Income** selection from the top toolbar into the filter menu of the **Type** column.
+- The top toolbar now stays intentionally minimal with global search, **Reset filters** and **Columns**.
+- Moved the remaining advanced filters into their matching table columns: tags under Name, monthly range under Month, uncategorized under Category and auto-renew under Status.
+- Saved views remain backward compatible with the previous top-level type filter.
+- Hardened Proxmox updates against `ENOSPC`: the updater clears stale Docker/BuildKit caches before building and prunes obsolete build cache/images after a successful update.
+- Moved the Proxmox update logic into a standalone source-controlled helper that refreshes itself after successful updates, so future updater fixes no longer require reinstalling the LXC helper.
+- Added a free-space preflight before and after the automatic pre-update backup with a clear resize hint when the LXC is too small.
+- Increased the Proxmox Quick Setup default root disk from 8 GB to **16 GB** for safer Docker/npm builds.
+- The frontend build now removes the npm download cache from the build layer after dependency installation.
+
 ## 0.4.8
 
 - Dashboard values are now month-focused: clicking a month in the income-vs-expenses chart updates all KPI cards, category charts, contract counts and monthly date information to that point in time.
