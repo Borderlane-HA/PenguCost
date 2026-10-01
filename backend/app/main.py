@@ -1,9 +1,14 @@
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
+import hashlib
+import ipaddress
 import json
 import re
+import threading
+import time
 import urllib.request
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Literal, Any
@@ -23,7 +28,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.3'
+APP_VERSION = '0.4.4'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -32,6 +37,8 @@ def migrate_schema():
     # create_all does not add columns to existing SQLite tables. Keep upgrades in-place.
     columns = {c['name'] for c in inspect(engine).get_columns('expenses')}
     statements = []
+    if 'provider_website' not in columns:
+        statements.append("ALTER TABLE expenses ADD COLUMN provider_website VARCHAR(500) DEFAULT ''")
     if 'entry_type' not in columns:
         statements.append("ALTER TABLE expenses ADD COLUMN entry_type VARCHAR(16) DEFAULT 'expense'")
     if 'minimum_term_months' not in columns:
@@ -117,23 +124,31 @@ PROVIDER_ICON_DIR = DATA_DIR / 'provider-icons'
 PROVIDER_ICON_DIR.mkdir(parents=True, exist_ok=True)
 PROVIDER_ICON_CATALOG = [
     {'key':'apple','aliases':['apple','apple one','icloud','apple music'],'slug':'apple','domain':'apple.com'},
-    {'key':'spotify','aliases':['spotify'],'slug':'spotify','domain':'spotify.com'},
+    {'key':'spotify','aliases':['spotify','spotify premium'],'slug':'spotify','domain':'spotify.com'},
     {'key':'netflix','aliases':['netflix'],'slug':'netflix','domain':'netflix.com'},
     {'key':'amazon','aliases':['amazon','amazon prime','prime'],'slug':'amazon','domain':'amazon.de'},
     {'key':'openai','aliases':['openai','chatgpt'],'slug':'openai','domain':'openai.com'},
     {'key':'telekom','aliases':['telekom','deutsche telekom','magenta'],'slug':'deutschetelekom','domain':'telekom.de'},
-    {'key':'adac','aliases':['adac'],'slug':'adac','domain':'adac.de'},
+    {'key':'adac','aliases':['adac'],'domain':'adac.de'},
+    {'key':'huk24','aliases':['huk24','huk coburg','huk-coburg'],'domain':'huk24.de'},
+    {'key':'actalis','aliases':['actalis'],'domain':'actalis.com'},
     {'key':'microsoft','aliases':['microsoft','microsoft 365','office 365'],'slug':'microsoft','domain':'microsoft.com'},
     {'key':'adobe','aliases':['adobe','creative cloud'],'slug':'adobe','domain':'adobe.com'},
     {'key':'dropbox','aliases':['dropbox'],'slug':'dropbox','domain':'dropbox.com'},
     {'key':'github','aliases':['github'],'slug':'github','domain':'github.com'},
     {'key':'paypal','aliases':['paypal'],'slug':'paypal','domain':'paypal.com'},
+    {'key':'americanexpress','aliases':['american express','amex'],'slug':'americanexpress','domain':'americanexpress.com'},
     {'key':'vodafone','aliases':['vodafone'],'slug':'vodafone','domain':'vodafone.de'},
     {'key':'o2','aliases':['o2','telefonica'],'slug':'o2','domain':'o2online.de'},
     {'key':'disney','aliases':['disney','disney+','disney plus'],'slug':'disneyplus','domain':'disneyplus.com'},
     {'key':'sky','aliases':['sky','sky q'],'slug':'sky','domain':'sky.de'},
-    {'key':'spotify','aliases':['spotify premium'],'slug':'spotify','domain':'spotify.com'},
     {'key':'ionos','aliases':['ionos'],'slug':'ionos','domain':'ionos.de'},
+    {'key':'vattenfall','aliases':['vattenfall'],'domain':'vattenfall.de'},
+    {'key':'fraenk','aliases':['fraenk'],'domain':'fraenk.de'},
+    {'key':'rundfunkbeitrag','aliases':['gez','rundfunkbeitrag','ard zdf deutschlandradio'],'domain':'rundfunkbeitrag.de'},
+    {'key':'sparkasse','aliases':['sparkasse'],'domain':'sparkasse.de'},
+    {'key':'cariad','aliases':['cariad'],'domain':'cariad.technology'},
+    {'key':'swi','aliases':['stadtwerke ingolstadt','swi einspeisung','swi'],'domain':'sw-i.de'},
 ]
 
 def _provider_key(value: str) -> str | None:
@@ -144,6 +159,44 @@ def _provider_key(value: str) -> str | None:
         if any(alias in text for alias in item['aliases']):
             return item['key']
     return None
+
+
+def _public_domain(value: str) -> str | None:
+    raw = (value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw if '://' in raw else 'https://' + raw)
+        host = (parsed.hostname or '').strip('.').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if not host or '.' not in host or host == 'localhost' or host.endswith(('.local','.internal','.lan')):
+            return None
+        try:
+            ipaddress.ip_address(host)
+            return None
+        except ValueError:
+            pass
+        if not re.fullmatch(r'[a-z0-9.-]+', host):
+            return None
+        return host
+    except Exception:
+        return None
+
+
+def _provider_icon_item(provider: str, website: str = '') -> dict | None:
+    key = _provider_key(provider)
+    website_domain = _public_domain(website)
+    if key:
+        base = next((dict(x) for x in PROVIDER_ICON_CATALOG if x['key'] == key), {'key': key})
+        if website_domain:
+            base['domain'] = website_domain
+        return base
+    if website_domain:
+        digest = hashlib.sha256(website_domain.encode('utf-8')).hexdigest()[:16]
+        return {'key': f'web-{digest}', 'aliases': [], 'domain': website_domain}
+    return None
+
 
 def _provider_icon_path(key: str) -> Path | None:
     for ext in ('svg','png'):
@@ -222,6 +275,7 @@ class CategoryPatch(BaseModel):
 class ExpenseIn(BaseModel):
     name: str
     provider: str = ''
+    provider_website: str = ''
     entry_type: Literal['expense', 'income'] = 'expense'
     amount: float = Field(gt=0)
     currency: str = 'EUR'
@@ -391,7 +445,7 @@ def expense_dict(x: Expense, as_of: date | None = None):
     if next_end and x.cancellation_notice_days is not None and (not next_cancel or next_cancel < today or next_end != x.contract_end):
         next_cancel = next_end - timedelta(days=max(0, x.cancellation_notice_days))
     return {
-        'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': current_amount, 'currency': x.currency,
+        'id': x.id, 'name': x.name, 'provider': x.provider, 'provider_website': x.provider_website or '', 'entry_type': (x.entry_type or 'expense'), 'amount': current_amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': months, 'monthly_equivalent': monthly,
         'yearly_equivalent': yearly, 'category_id': x.category_id, 'category': x.category.name if x.category else None,
         'category_color': x.category.color if x.category else '#7B8798', 'account_id': x.account_id,
@@ -525,6 +579,12 @@ def startup():
             db.add(AIProfile(name='Standard', provider=old_provider, base_url=old_base, model=old_model or 'model', api_key=old_key, enabled=old_enabled))
             db.commit()
     db.close()
+
+    global _PROVIDER_REFRESH_THREAD_STARTED
+    with _PROVIDER_REFRESH_THREAD_LOCK:
+        if not _PROVIDER_REFRESH_THREAD_STARTED:
+            threading.Thread(target=_provider_refresh_loop, daemon=True, name='pengucost-provider-icons').start()
+            _PROVIDER_REFRESH_THREAD_STARTED = True
 
 
 @app.get('/api/health')
@@ -835,7 +895,7 @@ def upsert_price(db: Session, x: Expense, amount: float, effective_from: date):
 
 
 @app.post('/api/expenses')
-def add_expense(data: ExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def add_expense(data: ExpenseIn, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
     validate_catalog_access(db, user, data.category_id, data.account_id)
     payload = normalized_expense_data(data)
     initial_amount = payload['amount']
@@ -845,11 +905,12 @@ def add_expense(data: ExpenseIn, user: User = Depends(current_user), db: Session
     db.add(ExpensePrice(expense_id=x.id, amount=initial_amount, valid_from=data.price_effective_from or data.start_date or date.today()))
     db.commit()
     db.refresh(x)
+    _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
     return expense_dict(x)
 
 
 @app.put('/api/expenses/{item_id}')
-def update_expense(item_id: int, data: ExpenseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def update_expense(item_id: int, data: ExpenseIn, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = owned_expense(db, user, item_id)
     validate_catalog_access(db, user, data.category_id, data.account_id)
     old_contract_end = x.contract_end
@@ -874,6 +935,7 @@ def update_expense(item_id: int, data: ExpenseIn, user: User = Depends(current_u
         db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='updated', changes_json=json.dumps(changes, default=str, ensure_ascii=False)))
     db.commit()
     db.refresh(x)
+    _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
     return expense_dict(x)
 
 
@@ -888,9 +950,8 @@ def delete_expense(item_id: int, user: User = Depends(current_user), db: Session
 @app.post('/api/expenses/{item_id}/clone')
 def clone_expense(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     source = owned_expense(db, user, item_id)
-    suffix = ' (Copy)' if language_for(db, user) == 'en' else ' (Kopie)'
     clone = Expense(
-        name=(source.name + suffix)[:160], provider=source.provider, entry_type=(source.entry_type or 'expense'), amount=source.amount, currency=source.currency,
+        name=((('Copy of ' if language_for(db, user) == 'en' else 'Kopie von ') + source.name))[:160], provider=source.provider, provider_website=source.provider_website, entry_type=(source.entry_type or 'expense'), amount=source.amount, currency=source.currency,
         billing_interval=source.billing_interval, interval_months=source.interval_months,
         minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months, renewal_amount=source.renewal_amount,
         category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
@@ -1010,6 +1071,8 @@ def _provider_icon_status(db: Session) -> dict:
         'source': setting_value(db, 'provider_icons.source', 'auto') or 'auto',
         'cached': len(list(PROVIDER_ICON_DIR.glob('*.svg'))) + len(list(PROVIDER_ICON_DIR.glob('*.png'))),
         'available': len({x['key'] for x in PROVIDER_ICON_CATALOG}),
+        'last_refresh': setting_value(db, 'provider_icons.last_refresh', ''),
+        'refresh_interval_hours': 24,
     }
 
 @app.get('/api/settings/provider-icons')
@@ -1023,7 +1086,17 @@ def save_provider_icon_settings(data: ProviderIconSettingsIn, _: User = Depends(
     db.commit()
     return _provider_icon_status(db)
 
-def _download_provider_icon(item: dict, source: str) -> bool:
+
+def _icon_is_fresh(key: str, hours: int = 24) -> bool:
+    path = _provider_icon_path(key)
+    return bool(path and (time.time() - path.stat().st_mtime) < hours * 3600)
+
+
+def _download_provider_icon(item: dict, source: str, force: bool = False) -> bool:
+    if not item or not item.get('key'):
+        return False
+    if not force and _icon_is_fresh(item['key']):
+        return False
     candidates = []
     if source in {'auto','simpleicons'} and item.get('slug'):
         candidates.append(('svg', f"https://cdn.simpleicons.org/{item['slug']}"))
@@ -1031,7 +1104,7 @@ def _download_provider_icon(item: dict, source: str) -> bool:
         candidates.append(('png', f"https://www.google.com/s2/favicons?domain={item['domain']}&sz=128"))
     for ext, url in candidates:
         try:
-            req = urllib.request.Request(url, headers={'User-Agent':'PenguCost/0.4.3'})
+            req = urllib.request.Request(url, headers={'User-Agent':f'PenguCost/{APP_VERSION}'})
             with urllib.request.urlopen(req, timeout=6) as response:
                 data = response.read(1_000_000)
             if not data:
@@ -1048,36 +1121,99 @@ def _download_provider_icon(item: dict, source: str) -> bool:
             continue
     return False
 
+
+def _provider_icon_targets(db: Session) -> list[dict]:
+    targets: dict[str, dict] = {x['key']: dict(x) for x in PROVIDER_ICON_CATALOG}
+    for provider, website in db.execute(select(Expense.provider, Expense.provider_website)).all():
+        item = _provider_icon_item(provider or '', website or '')
+        if item:
+            targets[item['key']] = item
+    return list(targets.values())
+
+
+def _refresh_provider_icons(force: bool = False) -> dict:
+    db = SessionLocal()
+    try:
+        status = _provider_icon_status(db)
+        if not status['enabled']:
+            return status
+        source = status['source'] if status['source'] in {'auto','simpleicons','favicons'} else 'auto'
+        targets = _provider_icon_targets(db)
+        refreshed = 0
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = [pool.submit(_download_provider_icon, item, source, force) for item in targets]
+            for future in as_completed(futures):
+                if future.result(): refreshed += 1
+        set_setting_value(db, 'provider_icons.last_refresh', datetime.utcnow().isoformat() + 'Z')
+        db.commit()
+        return {**_provider_icon_status(db), 'refreshed': refreshed}
+    finally:
+        db.close()
+
+
+def _refresh_provider_icon_for(provider: str, website: str, source: str):
+    item = _provider_icon_item(provider, website)
+    if item:
+        _download_provider_icon(item, source, False)
+
+
+def _schedule_provider_icon(background_tasks: BackgroundTasks, db: Session, provider: str, website: str):
+    if setting_value(db, 'provider_icons.enabled', 'false') != 'true':
+        return
+    source = setting_value(db, 'provider_icons.source', 'auto') or 'auto'
+    background_tasks.add_task(_refresh_provider_icon_for, provider or '', website or '', source)
+
+
 @app.post('/api/settings/provider-icons/refresh')
 def refresh_provider_icons(_: User = Depends(require_admin), db: Session = Depends(get_db)):
-    status = _provider_icon_status(db)
-    if not status['enabled']:
+    if setting_value(db, 'provider_icons.enabled', 'false') != 'true':
         raise HTTPException(400, 'External provider icons are disabled')
-    source = status['source'] if status['source'] in {'auto','simpleicons','favicons'} else 'auto'
-    unique = {x['key']:x for x in PROVIDER_ICON_CATALOG}.values()
-    refreshed = 0
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = [pool.submit(_download_provider_icon, item, source) for item in unique]
-        for future in as_completed(futures):
-            if future.result(): refreshed += 1
-    return {**_provider_icon_status(db), 'refreshed': refreshed}
+    return _refresh_provider_icons(force=True)
 
 @app.delete('/api/settings/provider-icons/cache')
 def clear_provider_icons(_: User = Depends(require_admin), db: Session = Depends(get_db)):
     for pattern in ('*.svg','*.png'):
         for file in PROVIDER_ICON_DIR.glob(pattern):
             file.unlink(missing_ok=True)
+    set_setting_value(db, 'provider_icons.last_refresh', '')
+    db.commit()
     return _provider_icon_status(db)
 
 @app.get('/api/provider-icons/resolve')
-def resolve_provider_icon(provider: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def resolve_provider_icon(provider: str = Query(default=''), website: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
     if setting_value(db, 'provider_icons.enabled', 'false') != 'true':
         return {'url': None, 'key': None}
-    key = _provider_key(provider)
-    if not key:
+    item = _provider_icon_item(provider, website)
+    if not item:
         return {'url': None, 'key': None}
-    path = _provider_icon_path(key)
-    return {'url': f'/provider-icons/{path.name}' if path else None, 'key': key}
+    path = _provider_icon_path(item['key'])
+    return {'url': f'/provider-icons/{path.name}' if path else None, 'key': item['key']}
+
+
+_PROVIDER_REFRESH_THREAD_STARTED = False
+_PROVIDER_REFRESH_THREAD_LOCK = threading.Lock()
+
+def _provider_refresh_loop():
+    # Check hourly; a full refresh is only performed when the last one is >=24h old.
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                enabled = setting_value(db, 'provider_icons.enabled', 'false') == 'true'
+                last = setting_value(db, 'provider_icons.last_refresh', '')
+            finally:
+                db.close()
+            due = True
+            if last:
+                try:
+                    due = datetime.fromisoformat(last.replace('Z','+00:00')).replace(tzinfo=None) <= datetime.utcnow() - timedelta(hours=24)
+                except Exception:
+                    due = True
+            if enabled and due:
+                _refresh_provider_icons(force=True)
+        except Exception:
+            pass
+        time.sleep(3600)
 
 
 def reminder_event(x: Expense, today: date, days: int):
@@ -1204,7 +1340,7 @@ def _datetime(value):
 
 def _raw_expense(x: Expense) -> dict[str, Any]:
     return {
-        'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': x.amount, 'currency': x.currency,
+        'id': x.id, 'name': x.name, 'provider': x.provider, 'provider_website': x.provider_website or '', 'entry_type': (x.entry_type or 'expense'), 'amount': x.amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': x.interval_months,
         'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months, 'renewal_amount': x.renewal_amount,
         'category_id': x.category_id, 'category_name': x.category.name if x.category else None, 'category_scope': (_catalog_scope(x.category.created_by) if x.category else None),
@@ -1222,7 +1358,7 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
 
 def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, account_id: int | None) -> Expense:
     return Expense(
-        name=str(row.get('name') or 'Imported entry')[:160], provider=str(row.get('provider') or '')[:160],
+        name=str(row.get('name') or 'Imported entry')[:160], provider=str(row.get('provider') or '')[:160], provider_website=str(row.get('provider_website') or '')[:500],
         entry_type=('income' if row.get('entry_type') == 'income' else 'expense'),
         amount=float(row.get('amount') or 0), currency=str(row.get('currency') or 'EUR')[:8],
         billing_interval=str(row.get('billing_interval') or 'monthly')[:20], interval_months=max(1, int(row.get('interval_months') or 1)),
@@ -1254,7 +1390,7 @@ def export_user_data(user: User = Depends(current_user), db: Session = Depends(g
     private_accounts = list(db.scalars(select(Account).where(Account.created_by == user.id).order_by(Account.id)))
     private_categories = list(db.scalars(select(Category).where(Category.created_by == user.id).order_by(Category.id)))
     return {
-        'format': 'pengucost-user-export', 'schema_version': 4, 'app_version': APP_VERSION,
+        'format': 'pengucost-user-export', 'schema_version': 5, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'user': {'username': user.username, 'display_name': user.display_name},
         'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
@@ -1381,7 +1517,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     categories = list(db.scalars(select(Category).order_by(Category.id)))
     expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
     return {
-        'format': 'pengucost-admin-export', 'schema_version': 4, 'app_version': APP_VERSION,
+        'format': 'pengucost-admin-export', 'schema_version': 5, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'session_version': int(u.session_version or 0), 'created_at': _iso(u.created_at)} for u in users],
         'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note, 'created_by': x.created_by} for x in accounts],

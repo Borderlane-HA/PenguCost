@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.4
+
+- Cloning is useful again: a clone opens as an unsaved draft named `Kopie von …` / `Copy of …` and keeps provider, amount, category, account/payment method, contract dates, renewal settings, tags, AI context and other useful fields.
+- Added optional **provider website** to entries so PenguCost can resolve the right logo even for providers that are not in the built-in catalog.
+- Provider icons are centered more consistently and the built-in provider catalog was expanded (including HUK24, ACTALIS, American Express, Vattenfall, fraenk, Rundfunkbeitrag, Sparkasse, CARIAD and Stadtwerke Ingolstadt).
+- When external provider icons are enabled, PenguCost checks the affected provider after every create/save and refreshes the complete icon cache automatically every 24 hours.
+- Provider icon settings now show the timestamp of the last full refresh.
+- Provider website values are included in user/admin JSON export and restore.
+
 ## 0.4.3
 
 - Reworked the New/Edit Entry dialog around a compact core form with collapsible Contract & Term, Renewal & Cancellation, More Details and AI Context sections.
