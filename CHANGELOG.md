@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.4
+
+### Changed
+- Reworked the Proxmox VE installer to use the guided PenguLab/PenguCoach-style setup flow.
+- Added Quick Setup and Advanced Setup before any LXC is created.
+- Advanced mode now configures VMID, hostname, CPU, RAM, swap, disk, rootfs/template storage, bridge, DHCP/static IPv4, VLAN, web port and source channel.
+- PenguCost source is downloaded and validated before LXC creation, preventing the previous release-bundle 404 from leaving a half-installed container.
+- Proxmox deployment now builds the selected source inside the LXC and therefore no longer depends on a GitHub release asset being present.
+- Failed installations now offer automatic cleanup of the incomplete LXC.
+- Added in-LXC helpers: `pengucost-status`, `pengucost-backup`, `pengucost-restore` and `pengucost-update`.
+- Source-based updates create a backup before building/restarting PenguCost.
+- Normal runtime remains offline-capable after installation; Internet is only required for installation, updates and optional external AI endpoints.
+
 ## 0.1.3
 - Added persistent reminder actions: Done, Remind later, and Contract cancelled.
 - Added snooze presets for 1/3/7/14/30 days with deadline capping.

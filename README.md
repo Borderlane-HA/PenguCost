@@ -108,35 +108,92 @@ On first start, PenguCost asks you to create the first administrator.
 
 ## Proxmox VE installation
 
-Supported by the installer:
+PenguCost includes a guided Proxmox installer inspired by the PenguLab/PenguCoach setup flow.
+
+Supported:
 - Proxmox VE 8.x → Debian 12 LXC
 - Proxmox VE 9.x → Debian 13 LXC
-- Unprivileged container
-- Docker inside the LXC
-- 2 vCPU / 2 GB RAM / 8 GB disk defaults
-- DHCP by default
+- unprivileged LXC with nesting/keyctl for Docker
+- Quick Setup with sensible defaults
+- Advanced Setup for VMID, hostname, CPU, RAM, swap, disk, storage, bridge, DHCP/static IPv4, VLAN, web port and source channel
+- Main branch, latest stable release/tag or exact tag
+- automatic cleanup offer if installation fails after LXC creation
+- built-in status, backup, restore and update helpers
 
-Run the installer on the Proxmox host:
-
-```bash
-bash scripts/proxmox-install.sh
-```
-
-Useful overrides:
+Run directly on the **Proxmox host as root**:
 
 ```bash
-VMID=220 \
-STORAGE=local-lvm \
-BRIDGE=vmbr0 \
-IP_CONFIG='ip=10.10.4.50/24,gw=10.10.4.1' \
-MEMORY=2048 \
-DISK=8 \
-bash scripts/proxmox-install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Borderlane-HA/PenguCost/main/scripts/proxmox-install.sh)
 ```
+
+### Quick Setup
+
+Quick Setup currently uses:
+
+```text
+VMID       next free Proxmox ID
+Hostname   pengucost
+CPU        2 cores
+RAM        2048 MB
+Swap       512 MB
+Disk       8 GB
+Bridge     vmbr0
+Network    DHCP
+Web port   8080
+Source     main
+```
+
+Before anything is created, the installer displays the complete configuration and asks for confirmation.
+
+### Advanced Setup
+
+Advanced Setup lets you choose:
+
+- container ID and hostname
+- CPU, RAM, swap and disk size
+- rootfs storage and template storage
+- network bridge
+- DHCP or static IPv4/CIDR + gateway
+- optional VLAN tag
+- PenguCost web port
+- `main`, latest stable release/tag or an exact Git tag
+
+The installer first downloads/checks the selected PenguCost source and prepares the Debian template. **The LXC is only created after those preflight steps succeed.** This avoids leaving a half-created container because a GitHub release asset or source ref is missing.
+
+### What is installed where?
+
+The installer itself runs on the Proxmox host, but Docker and PenguCost are installed **inside the new unprivileged LXC**. It does not install Docker on the Proxmox host.
+
+Inside the LXC:
+
+```text
+/opt/pengucost-src     checked-out/extracted PenguCost source
+/opt/pengucost         runtime compose file + installed version
+/var/backups/pengucost automatic/manual backups
+```
+
+### Management commands
+
+From the Proxmox host, for example with LXC `103`:
+
+```bash
+pct exec 103 -- pengucost-status
+pct exec 103 -- pengucost-backup
+pct exec 103 -- pengucost-update main
+pct exec 103 -- pengucost-update stable
+```
+
+Restore a backup:
+
+```bash
+pct exec 103 -- pengucost-restore /var/backups/pengucost/<backup-file>.tar.gz
+```
+
+Updates create a data backup before downloading/building the new source.
 
 ### Offline behavior
 
-The normal first-time Proxmox installation may use Internet access to obtain the Debian template, Docker packages and the PenguCost release bundle. The release bundle contains the complete PenguCost Docker image.
+The initial installation requires Internet access for the Debian template/packages and the Docker image build dependencies. The selected PenguCost source is downloaded **before LXC creation**.
 
 **After installation the PenguCost core application does not require Internet access.**
 
@@ -144,19 +201,14 @@ Network access is only needed for:
 1. deliberately requested PenguCost updates, or
 2. an optional externally hosted AI endpoint.
 
-If the offline bundle has already been downloaded to the Proxmox host, use:
-
-```bash
-BUNDLE_PATH=/root/pengucost-offline-amd64.tar.gz bash scripts/proxmox-install.sh
-```
-
+If installation fails after the LXC has been created, the installer offers to remove the incomplete LXC automatically. This can also be controlled for scripted installs using `AUTO_CLEANUP=yes` or `AUTO_CLEANUP=no`.
 
 ## Build an offline bundle locally
 
-If you want to test the Proxmox installer before publishing a GitHub release, build the bundle on any Docker-capable machine:
+The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.3
+./scripts/build-offline-bundle.sh 0.1.4
 ```
 
 This creates:
@@ -165,11 +217,7 @@ This creates:
 dist/pengucost-offline-amd64.tar.gz
 ```
 
-Copy that archive to the Proxmox host and run:
-
-```bash
-BUNDLE_PATH=/root/pengucost-offline-amd64.tar.gz bash scripts/proxmox-install.sh
-```
+The guided Proxmox installer no longer depends on this release asset. It installs directly from the selected Git source and therefore cannot fail just because a GitHub release bundle has not been published yet.
 
 ## Updating a Proxmox installation
 
@@ -288,6 +336,15 @@ PenguCost ships with a source-available personal/non-commercial license in `LICE
 - Configurable category colors used throughout the overview.
 - Reminder bell for cancellation deadlines and automatic renewals.
 - Configurable reminder lead time in Settings.
+
+### Added in 0.1.4
+- Guided Proxmox VE installer with Quick and Advanced setup modes
+- Preflight source download before LXC creation
+- Main / stable / exact-tag install channels
+- DHCP/static IPv4, VLAN and port configuration in the installer
+- Automatic cleanup prompt for incomplete LXC installations
+- `pengucost-status`, `pengucost-backup`, `pengucost-restore` and source-based `pengucost-update` helpers
+- Docker remains isolated inside the unprivileged LXC; nothing is installed on the Proxmox host itself
 
 ### Added in 0.1.3
 - Persistent reminder actions: Done, Remind later and Contract cancelled.
