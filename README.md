@@ -208,7 +208,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.5
+./scripts/build-offline-bundle.sh 0.1.6
 ```
 
 This creates:
@@ -337,6 +337,11 @@ PenguCost ships with a source-available personal/non-commercial license in `LICE
 - Reminder bell for cancellation deadlines and automatic renewals.
 - Configurable reminder lead time in Settings.
 
+
+### Fixed in 0.1.6
+
+- Added explicit Vite/CSS TypeScript declarations so production builds accept the global `styles.css` side-effect import.
+- The Proxmox install path is now verified with the real frontend production build (`tsc -b && vite build`).
 
 ### Added in 0.1.5
 - Clear, unambiguous `PENGUCOST` banner in the guided Proxmox installer.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6
+
+### Fixed
+- Added `frontend/src/vite-env.d.ts` with Vite/CSS declarations so `tsc -b` can resolve the global stylesheet side-effect import during Docker builds.
+- Updated project version references and installer tag example to 0.1.6.
+
 ## 0.1.5
 
 ### Fixed
