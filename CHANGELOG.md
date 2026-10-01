@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- Added self-service password changes under Settings for every user.
+- Users must confirm their current password before setting a new one.
+- Added administrator password reset controls for every local account, including the currently signed-in administrator.
+- Password reset and change endpoints enforce the existing minimum length, store only Argon2 password hashes and invalidate older login sessions.
+
 ## 0.4.1
 
 - Added private per-user accounts, cards/payment methods and categories alongside global administrator templates.

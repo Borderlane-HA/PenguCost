@@ -9,6 +9,8 @@ It normalizes different billing cycles, keeps price history intact, tracks cance
 
 PenguCost is designed to stay simple: **see what regularly comes in, what goes out and where you can act.**
 
+Local multi-user accounts are isolated from each other. Users can change their own passwords in Settings, while administrators can reset any local account password from User management.
+
 ---
 
 ## Proxmox VE
@@ -86,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.1
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.2
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards.

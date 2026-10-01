@@ -20,7 +20,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.4.1'
+APP_VERSION = '0.4.2'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -51,6 +51,10 @@ def migrate_schema():
         with engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
+    user_columns = {c['name'] for c in inspect(engine).get_columns('users')}
+    if 'session_version' not in user_columns:
+        with engine.begin() as conn:
+            conn.execute(text('ALTER TABLE users ADD COLUMN session_version INTEGER DEFAULT 0'))
     category_columns = {c['name'] for c in inspect(engine).get_columns('categories')}
     account_columns = {c['name'] for c in inspect(engine).get_columns('accounts')}
     with engine.begin() as conn:
@@ -133,9 +137,18 @@ class UserIn(BaseModel):
 
 class UserPatch(BaseModel):
     display_name: Optional[str] = None
-    password: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=8)
     role: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class PasswordResetIn(BaseModel):
+    password: str = Field(min_length=8)
 
 
 class AccountIn(BaseModel):
@@ -256,9 +269,10 @@ class AIBrainIn(BaseModel):
     summary: str = Field(default='', max_length=12000)
 
 
-def current_user(uid: int = Depends(session_user_id), db: Session = Depends(get_db)):
+def current_user(session: tuple[int, int] = Depends(session_user_id), db: Session = Depends(get_db)):
+    uid, session_version = session
     user = db.get(User, uid)
-    if not user or not user.is_active:
+    if not user or not user.is_active or int(user.session_version or 0) != session_version:
         raise HTTPException(401, 'Not authenticated')
     return user
 
@@ -486,7 +500,7 @@ def bootstrap(data: BootstrapIn, response: Response, db: Session = Depends(get_d
     adopt_orphan_expenses(db, user.id)
     db.commit()
     db.refresh(user)
-    response.set_cookie('pengucost_session', make_session(user.id), httponly=True, samesite='lax', secure=False, max_age=2592000)
+    response.set_cookie('pengucost_session', make_session(user.id, int(user.session_version or 0)), httponly=True, samesite='lax', secure=False, max_age=2592000)
     return {'id': user.id, 'username': user.username, 'display_name': user.display_name, 'role': user.role}
 
 
@@ -495,13 +509,26 @@ def login(data: LoginIn, response: Response, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.username == data.username.strip().lower()))
     if not user or not user.is_active or not verify_password(data.password, user.password_hash):
         raise HTTPException(401, 'Invalid credentials')
-    response.set_cookie('pengucost_session', make_session(user.id), httponly=True, samesite='lax', secure=False, max_age=2592000)
+    response.set_cookie('pengucost_session', make_session(user.id, int(user.session_version or 0)), httponly=True, samesite='lax', secure=False, max_age=2592000)
     return {'id': user.id, 'username': user.username, 'display_name': user.display_name, 'role': user.role}
 
 
 @app.post('/api/auth/logout')
 def logout(response: Response):
     response.delete_cookie('pengucost_session')
+    return {'ok': True}
+
+
+@app.put('/api/auth/password')
+def change_own_password(data: PasswordChangeIn, response: Response, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not verify_password(data.current_password, user.password_hash):
+        raise HTTPException(400, 'Current password is incorrect')
+    if verify_password(data.new_password, user.password_hash):
+        raise HTTPException(400, 'New password must be different')
+    user.password_hash = hash_password(data.new_password)
+    user.session_version = int(user.session_version or 0) + 1
+    db.commit()
+    response.set_cookie('pengucost_session', make_session(user.id, user.session_version), httponly=True, samesite='lax', secure=False, max_age=2592000)
     return {'ok': True}
 
 
@@ -527,6 +554,19 @@ def create_user(data: UserIn, _: User = Depends(require_admin), db: Session = De
         db.rollback()
         raise HTTPException(409, 'Username already exists')
     return {'id': u.id}
+
+
+@app.put('/api/users/{user_id}/password')
+def admin_reset_password(user_id: int, data: PasswordResetIn, response: Response, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(404, 'User not found')
+    u.password_hash = hash_password(data.password)
+    u.session_version = int(u.session_version or 0) + 1
+    db.commit()
+    if u.id == admin.id:
+        response.set_cookie('pengucost_session', make_session(u.id, u.session_version), httponly=True, samesite='lax', secure=False, max_age=2592000)
+    return {'ok': True}
 
 
 @app.patch('/api/users/{user_id}')
@@ -1220,7 +1260,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     return {
         'format': 'pengucost-admin-export', 'schema_version': 4, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
-        'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'created_at': _iso(u.created_at)} for u in users],
+        'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'session_version': int(u.session_version or 0), 'created_at': _iso(u.created_at)} for u in users],
         'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note, 'created_by': x.created_by} for x in accounts],
         'categories': [{'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color, 'created_by': x.created_by} for x in categories],
         'hidden_catalog_items': [{'id': x.id, 'user_id': x.user_id, 'item_type': x.item_type, 'item_id': x.item_id, 'created_at': _iso(x.created_at)} for x in db.scalars(select(HiddenCatalogItem).order_by(HiddenCatalogItem.id))],
@@ -1248,7 +1288,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
         db.execute(text(f'DELETE FROM {table}'))
     db.flush()
     for u in users_in:
-        db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), created_at=_datetime(u.get('created_at'))))
+        db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), session_version=int(u.get('session_version') or 0), created_at=_datetime(u.get('created_at'))))
     for x in payload.get('accounts') or []:
         db.add(Account(id=int(x['id']), name=str(x['name']), kind=str(x.get('kind') or 'bank'), note=str(x.get('note') or ''), created_by=x.get('created_by')))
     for x in payload.get('categories') or []:

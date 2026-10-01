@@ -34,15 +34,15 @@ def verify_password(password: str, hashed: str) -> bool:
     except VerifyMismatchError:
         return False
 
-def make_session(user_id: int) -> str:
-    return serializer.dumps({'uid': user_id})
+def make_session(user_id: int, session_version: int = 0) -> str:
+    return serializer.dumps({'uid': user_id, 'sv': session_version})
 
-def session_user_id(pengucost_session: str | None = Cookie(default=None)) -> int:
+def session_user_id(pengucost_session: str | None = Cookie(default=None)) -> tuple[int, int]:
     if not pengucost_session:
         raise HTTPException(401, 'Not authenticated')
     try:
         payload = serializer.loads(pengucost_session, max_age=60 * 60 * 24 * 30)
-        return int(payload['uid'])
+        return int(payload['uid']), int(payload.get('sv', 0))
     except (BadSignature, SignatureExpired, KeyError, ValueError):
         raise HTTPException(401, 'Invalid session')
 

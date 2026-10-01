@@ -37,3 +37,10 @@ The normal administrator UI still does not expose another user's cost data. The 
 ## Financial data isolation
 
 Income entries, expenses, contracts, dashboard selections, reminders and AI payloads are scoped to the authenticated owner. Administrator privileges do not expose another user's financial entries through normal application views; only the explicit full-instance backup/restore path contains all users' data.
+
+## Password management
+
+- Local passwords are stored only as Argon2 hashes.
+- Users can change their own password only after confirming the current password.
+- Administrators can reset passwords for any local account, including their own, from User management. Password changes/reset invalidate older signed-in sessions for that account.
+- Use a unique, sufficiently long password for every PenguCost account.
