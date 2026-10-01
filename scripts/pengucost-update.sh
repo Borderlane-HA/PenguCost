@@ -28,24 +28,34 @@ cleanup_build_space() {
   docker image prune -af >/dev/null 2>&1 || true
   docker container prune -f >/dev/null 2>&1 || true
 }
+prune_old_backups() {
+  mkdir -p /var/backups/pengucost
+  mapfile -t old_backups < <(ls -1t /var/backups/pengucost/pengucost-preupdate-*.tar.gz 2>/dev/null | tail -n +11 || true)
+  if ((${#old_backups[@]})); then
+    echo "Removing ${#old_backups[@]} old pre-update backup(s); keeping the newest 10 ..."
+    rm -f -- "${old_backups[@]}"
+  fi
+}
 require_build_space() {
   local free
   free=$(free_mb)
   echo "Free disk space for update: ${free} MB"
-  if (( free < 2500 )); then
-    echo 'Not enough free disk space to build PenguCost safely (at least 2500 MB recommended).' >&2
+  if (( free < 5000 )); then
+    echo 'Not enough free disk space to build PenguCost safely (at least 5000 MB recommended).' >&2
     echo 'On the Proxmox host enlarge the LXC root disk, for example: pct resize <VMID> rootfs +8G' >&2
     exit 1
   fi
 }
 
 cleanup_build_space
+prune_old_backups
 require_build_space
 
 mkdir -p /var/backups/pengucost
 BACKUP="/var/backups/pengucost/pengucost-preupdate-$(date +%Y%m%d-%H%M%S).tar.gz"
 bash /opt/pengucost-src/scripts/backup.sh "$BACKUP"
 echo "Backup: $BACKUP"
+cleanup_build_space
 require_build_space
 
 curl -fL --retry 2 "$URL" -o "$TMP/source.tar.gz"

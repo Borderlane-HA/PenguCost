@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.10
+
+- Fixed the TypeScript production-build error in saved-view migration (`TS1117`: duplicate `types` property).
+- Update preflight now requires 5 GB of free root-disk space before starting a Docker/Node build.
+- Update cleanup explicitly prunes Docker BuildKit cache and unused images before the build and again after the safety backup.
+- Pre-update backup retention keeps the newest 10 automatic backups to avoid silent disk growth.
+
 ## 0.4.9
 
 - Moved the **All / Expenses / Income** selection from the top toolbar into the filter menu of the **Type** column.
