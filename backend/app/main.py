@@ -19,7 +19,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs
 
-app = FastAPI(title='PenguCost', version='0.1.7')
+app = FastAPI(title='PenguCost', version='0.1.8')
 Base.metadata.create_all(engine)
 
 
@@ -362,7 +362,7 @@ def startup():
 
 @app.get('/api/health')
 def health():
-    return {'status': 'ok', 'service': 'PenguCost', 'version': '0.1.7'}
+    return {'status': 'ok', 'service': 'PenguCost', 'version': '0.1.8'}
 
 
 @app.get('/api/auth/status')

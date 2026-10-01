@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8
+
+### Fixed
+- Fixed Proxmox/LXC backups failing with `Permission denied` when the application image runs as the unprivileged `pengucost` user.
+- Backup and restore utility containers now run as root only for filesystem/archive operations; the PenguCost application remains unprivileged.
+- Proxmox helper scripts invoke repository scripts through `bash`, so updates no longer depend on Git archive executable bits.
+- Installer output now uses absolute `/usr/local/sbin/pengucost-*` helper paths for reliable `pct exec` usage.
+
 ## 0.1.7
 
 - Enforced strict per-user ownership for expenses, dashboards, reminders and AI payloads. Administrators no longer see other users' cost data.

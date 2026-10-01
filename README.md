@@ -210,7 +210,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.7
+./scripts/build-offline-bundle.sh 0.1.8
 ```
 
 This creates:

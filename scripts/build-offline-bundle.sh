@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-VERSION="${1:-0.1.7}"
+VERSION="${1:-0.1.8}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${2:-$ROOT/dist}"
 IMAGE="pengucost:${VERSION}"

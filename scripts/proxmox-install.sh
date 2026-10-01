@@ -180,7 +180,7 @@ advanced_setup() {
     2) INSTALL_CHANNEL="stable" ;;
     3)
       INSTALL_CHANNEL="tag"
-      EXACT_TAG="$(prompt 'Tag (example v0.1.7)' "$EXACT_TAG")"
+      EXACT_TAG="$(prompt 'Tag (example v0.1.8)' "$EXACT_TAG")"
       ;;
     *) fail "Invalid source selection."; exit 1 ;;
   esac
@@ -415,14 +415,14 @@ cat > "$TMPDIR/pengucost-backup" <<'BACKUP'
 set -Eeuo pipefail
 OUT="${1:-/var/backups/pengucost/pengucost-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
 mkdir -p "$(dirname "$OUT")"
-exec /opt/pengucost-src/scripts/backup.sh "$OUT"
+exec bash /opt/pengucost-src/scripts/backup.sh "$OUT"
 BACKUP
 
 cat > "$TMPDIR/pengucost-restore" <<'RESTORE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 [[ $# -eq 1 ]] || { echo 'Usage: pengucost-restore BACKUP.tar.gz' >&2; exit 1; }
-exec /opt/pengucost-src/scripts/restore.sh "$1"
+exec bash /opt/pengucost-src/scripts/restore.sh "$1"
 RESTORE
 
 cat > "$TMPDIR/pengucost-update" <<'UPDATE'
@@ -449,7 +449,7 @@ fi
 
 mkdir -p /var/backups/pengucost
 BACKUP="/var/backups/pengucost/pengucost-preupdate-$(date +%Y%m%d-%H%M%S).tar.gz"
-/opt/pengucost-src/scripts/backup.sh "$BACKUP"
+bash /opt/pengucost-src/scripts/backup.sh "$BACKUP"
 echo "Backup: $BACKUP"
 
 curl -fL --retry 2 "$URL" -o "$TMP/source.tar.gz"
@@ -514,10 +514,10 @@ printf '  URL       : http://%s:%s\n' "$IP" "$APP_PORT"
 printf '  LXC       : %s (%s)\n' "$VMID" "$CT_HOSTNAME"
 printf '  Version   : %s\n' "$SOURCE_REF"
 printf '\n%bManagement from the Proxmox host%b\n' "$C_BOLD" "$C_RESET"
-printf '  Status    : pct exec %s -- pengucost-status\n' "$VMID"
-printf '  Backup    : pct exec %s -- pengucost-backup\n' "$VMID"
-printf '  Update    : pct exec %s -- pengucost-update main\n' "$VMID"
-printf '  Stable    : pct exec %s -- pengucost-update stable\n' "$VMID"
+printf '  Status    : pct exec %s -- /usr/local/sbin/pengucost-status\n' "$VMID"
+printf '  Backup    : pct exec %s -- /usr/local/sbin/pengucost-backup\n' "$VMID"
+printf '  Update    : pct exec %s -- /usr/local/sbin/pengucost-update main\n' "$VMID"
+printf '  Stable    : pct exec %s -- /usr/local/sbin/pengucost-update stable\n' "$VMID"
 printf '\n%bOffline%b\n' "$C_BOLD" "$C_RESET"
 printf '  Normal PenguCost operation does not require Internet access.\n'
 printf '  Internet is only required for updates and optional external AI endpoints.\n\n'
