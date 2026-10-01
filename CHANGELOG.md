@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.11
+
+- Improve readability of the **Income & Expenses** table with subtle alternating row backgrounds (zebra striping).
+- Zebra colors follow the active PenguCost theme and keep a clear hover highlight across the whole row.
+
 ## 0.4.10
 
 - Fixed the TypeScript production-build error in saved-view migration (`TS1117`: duplicate `types` property).

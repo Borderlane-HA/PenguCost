@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.10
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.11
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards. It also cleans stale Docker build cache before the build and checks that enough free disk space is available. If an older small LXC runs out of space, enlarge it on the Proxmox host, for example with `pct resize <VMID> rootfs +8G`. The update helper is source-controlled and refreshes itself after successful updates.
