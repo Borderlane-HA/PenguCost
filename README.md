@@ -222,7 +222,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.2.0
+./scripts/build-offline-bundle.sh 0.2.1
 ```
 
 This creates:
@@ -250,7 +250,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update latest
 Or update to a specific release tag:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.2.0
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.2.1
 ```
 
 The persistent `/data` Docker volume is not replaced by an update.
@@ -354,6 +354,8 @@ PenguCost ships with a source-available personal/non-commercial license in `LICE
 - Multiple admin-managed AI profiles and provider dropdowns for Ollama, OpenAI, Grok/xAI, Gemini, IONOS, Claude and Custom.
 - Members can use enabled AI profiles but cannot manage or inspect credentials/endpoints.
 - Dashboard now selects all active own costs by default and automatically includes newly added costs.
+- Dashboard year selector: current year by default, available historical years based on stored data, plus forecast targets for +1, +2 and +5 years.
+- Historical/forecast views recalculate monthly averages, annual totals, categories, contract dates and cash-flow charts for the selected year.
 
 ### Fixed in 0.1.6
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- Added an explicit dashboard year selector while keeping the current year as the default view.
+- Historical years appear automatically only when the signed-in user has relevant contract/price data for those years.
+- Added forecast targets for +1, +2 and +5 years.
+- Forecast calculations use known price phases, contract terms and automatic renewal periods instead of copying today's total unchanged.
+- Historical/forecast views calculate year totals and average monthly expense, income and delta for the selected year.
+- Category breakdowns and the interactive item selector now follow the selected dashboard year.
+- Upcoming dates switch from the current 60-day window to contract/cancellation dates inside the selected historical or forecast year.
+- The selected year is shown prominently in the dashboard and in the cash-flow chart subtitle.
+
+
 ## 0.2.0
 
 - Added recurring **income** alongside expenses using a backwards-compatible `entry_type` field. Existing entries migrate automatically as expenses.
