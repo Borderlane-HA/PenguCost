@@ -10,13 +10,13 @@ The goal is deliberately narrower than a classic budgeting app: **make recurring
 - **Normalized cost view** — every item is converted to monthly and yearly equivalents
 - **Contract lifecycle** — contract start, minimum term, exact/under-year contract end, cancellation deadline, notice period and configurable renewal period
 - **Actionable reminders** — notification bell with configurable lead time, done/snooze/cancel actions and automatic-renewal warnings
-- **Accounts & categories** — assign costs to bank accounts/payment methods and custom categories
+- **Accounts & categories** — administrator-managed global templates; members can hide entries only for their own view
 - **Interactive analysis** — click individual subscriptions/contracts on or off; all totals and charts update immediately
 - **Historical price phases** — price changes are effective from a chosen date and never rewrite past months
 - **Annual payment forecast** — chart actual expected payment months where a next due date is known, using the price valid at each payment date
-- **Multi-user** — local users with Admin and Member roles
+- **Multi-user privacy** — local Admin/Member accounts with strict per-user cost, contract, dashboard, reminder and AI-data isolation
 - **Themes** — System, Light, Midnight, Nordic, Graphite and Emerald with flash-free theme loading
-- **Optional PenguCost AI** — OpenAI-compatible endpoint for savings analysis and contract attention hints
+- **Optional PenguCost AI** — admin-managed profiles for Ollama, OpenAI, Grok/xAI, Gemini, IONOS AI Model Hub, Claude and custom endpoints
 - **Local-first & offline capable** — no CDN, no telemetry, no cloud dependency for the core app
 - **Docker & Proxmox** — Docker Compose plus a Proxmox VE 8/9 LXC installer
 - **Backup-friendly** — all persistent state lives in one Docker volume
@@ -72,7 +72,7 @@ Contracts are date-based rather than calendar-year based. A contract may start o
 
 
 ### Reminder center
-The bell in the top bar shows the number of contracts that currently need attention. The reminder lead time is configured globally in **Settings → Cancellation reminders**.
+The bell in the top bar shows the number of contracts that currently need attention. The reminder lead time is configured **per user** in **Settings → Cancellation reminders**.
 
 Each reminder can be handled directly:
 - **Done** hides only the current reminder cycle. A later renewal/cancellation cycle creates a new reminder.
@@ -82,13 +82,15 @@ Each reminder can be handled directly:
 This state is stored in SQLite and therefore survives restarts and upgrades.
 
 ### AI Analysis
-PenguCost can send only the currently selected cost items to an OpenAI-compatible `/chat/completions` endpoint. Example goals:
+Administrators create one or more AI profiles in Settings and decide which profiles are enabled for users. Provider presets are available for **Ollama, OpenAI, Grok/xAI, Google Gemini, IONOS AI Model Hub, Claude/Anthropic and custom OpenAI-compatible endpoints**.
+
+Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. PenguCost sends only that user's currently selected cost items to the chosen profile. Example goals:
 
 > I want to reduce monthly recurring costs by €80 without touching essential contracts.
 
 > Which contracts need attention soon and where are the largest optional costs?
 
-The system prompt explicitly tells the model **not to invent market prices or offers**. External AI is optional; a local OpenAI-compatible service can be used for an entirely local setup.
+The system prompt explicitly tells the model **not to invent market prices or offers**. Claude uses the native Anthropic Messages API; the other presets use OpenAI-compatible chat completions. External AI is optional; Ollama can keep the analysis local.
 
 ## Docker installation
 
@@ -208,7 +210,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.6
+./scripts/build-offline-bundle.sh 0.1.7
 ```
 
 This creates:
@@ -250,16 +252,11 @@ The persistent `/data` Docker volume is not replaced by an update.
 
 For a Proxmox deployment, a normal Proxmox LXC backup additionally protects the whole container.
 
-## AI endpoint configuration
+## AI profile configuration
 
-As administrator open **Settings → OpenAI-compatible AI** and configure:
+As administrator open **Settings → AI providers & models**. Add as many profiles as required and choose a provider preset, profile name, base URL, model and API key. Each profile can be enabled or disabled for normal users independently.
 
-- Base URL, for example `https://provider.example/v1`
-- Model name
-- API key
-- Enable AI
-
-The API key is encrypted before it is stored in the local database. PenguCost itself does not ship a cloud account or relay service.
+Normal users only see the profile name, provider and model in **AI Analysis**. Base URLs and API keys remain admin-only. API keys are encrypted before they are stored in the local database. PenguCost itself does not ship a cloud account or relay service.
 
 ## Architecture
 
@@ -321,7 +318,7 @@ For Internet-facing installations, place PenguCost behind a trusted HTTPS revers
 - CSV import/export
 - Contract document attachments
 - Historical year-over-year comparison and price-change deltas
-- Per-user access scopes / household sharing
+- Optional household sharing of selected individual costs between users
 - OIDC as an optional alternative to local users
 - Savings goals with progress tracking
 - Optional price/provider research as a separate explicit online feature
@@ -337,6 +334,14 @@ PenguCost ships with a source-available personal/non-commercial license in `LICE
 - Reminder bell for cancellation deadlines and automatic renewals.
 - Configurable reminder lead time in Settings.
 
+
+
+### Added in 0.1.7
+- Strict per-user isolation for expenses, contracts, dashboards, reminders and AI payloads.
+- Admin-managed global account/category templates with per-user hide/restore behavior.
+- Multiple admin-managed AI profiles and provider dropdowns for Ollama, OpenAI, Grok/xAI, Gemini, IONOS, Claude and Custom.
+- Members can use enabled AI profiles but cannot manage or inspect credentials/endpoints.
+- Dashboard now selects all active own costs by default and automatically includes newly added costs.
 
 ### Fixed in 0.1.6
 

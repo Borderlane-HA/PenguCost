@@ -3,6 +3,8 @@ export type Expense={id:number;name:string;provider:string;amount:number;currenc
 export type Account={id:number;name:string;kind:string;note:string}
 export type Category={id:number;name:string;icon:string;color:string}
 export type User={id:number;username:string;display_name:string;role:string;is_active?:boolean}
+export type AIProvider={id:string;label:string;default_base_url:string;key_optional:boolean}
+export type AIProfile={id:number;name:string;provider:string;provider_label:string;model:string;enabled:boolean;base_url?:string;has_api_key?:boolean}
 
 export async function api<T=any>(url:string,options:RequestInit={}):Promise<T>{
  const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json',...(options.headers||{})},...options})

@@ -180,7 +180,7 @@ advanced_setup() {
     2) INSTALL_CHANNEL="stable" ;;
     3)
       INSTALL_CHANNEL="tag"
-      EXACT_TAG="$(prompt 'Tag (example v0.1.6)' "$EXACT_TAG")"
+      EXACT_TAG="$(prompt 'Tag (example v0.1.7)' "$EXACT_TAG")"
       ;;
     *) fail "Invalid source selection."; exit 1 ;;
   esac

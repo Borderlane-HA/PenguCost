@@ -1,7 +1,8 @@
 from datetime import datetime, date
-from sqlalchemy import String, Float, Boolean, Date, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import String, Float, Boolean, Date, DateTime, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
+
 
 class User(Base):
     __tablename__ = 'users'
@@ -13,6 +14,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+
 class Account(Base):
     __tablename__ = 'accounts'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -20,12 +22,24 @@ class Account(Base):
     kind: Mapped[str] = mapped_column(String(40), default='bank')
     note: Mapped[str] = mapped_column(String(255), default='')
 
+
 class Category(Base):
     __tablename__ = 'categories'
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
     icon: Mapped[str] = mapped_column(String(40), default='wallet')
     color: Mapped[str] = mapped_column(String(16), default='#5B5CF0')
+
+
+class HiddenCatalogItem(Base):
+    __tablename__ = 'hidden_catalog_items'
+    __table_args__ = (UniqueConstraint('user_id', 'item_type', 'item_id', name='uq_hidden_catalog_item'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    item_type: Mapped[str] = mapped_column(String(20), index=True)
+    item_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
 
 class Expense(Base):
     __tablename__ = 'expenses'
@@ -51,7 +65,7 @@ class Expense(Base):
     essential: Mapped[bool] = mapped_column(Boolean, default=False)
     tags: Mapped[str] = mapped_column(String(255), default='')
     notes: Mapped[str] = mapped_column(Text, default='')
-    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -70,6 +84,7 @@ class ExpensePrice(Base):
 
     expense = relationship(Expense, back_populates='prices')
 
+
 class ReminderAction(Base):
     __tablename__ = 'reminder_actions'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -77,9 +92,23 @@ class ReminderAction(Base):
     event_key: Mapped[str] = mapped_column(String(160), index=True)
     action: Mapped[str] = mapped_column(String(20))
     snooze_until: Mapped[date | None] = mapped_column(Date, nullable=True)
-    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AIProfile(Base):
+    __tablename__ = 'ai_profiles'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), default='AI')
+    provider: Mapped[str] = mapped_column(String(40), default='custom')
+    base_url: Mapped[str] = mapped_column(String(500), default='')
+    model: Mapped[str] = mapped_column(String(200), default='')
+    api_key: Mapped[str] = mapped_column(Text, default='')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class Setting(Base):
     __tablename__ = 'settings'

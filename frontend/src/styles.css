@@ -68,3 +68,14 @@ html[data-theme="emerald"]{--bg:#f1f7f5;--panel:#fff;--panel-2:#eef7f3;--text:#1
 .reminder-error{color:var(--danger)!important;font-weight:700}
 @media(max-width:560px){.reminder-actions{align-items:stretch;flex-direction:column}.reminder-actions>button,.snooze-control{width:100%}.snooze-control select,.snooze-control button{flex:1}.mini-action{justify-content:center}}
 .cancelled-label{display:block;margin-top:3px;color:var(--danger);font-size:9px;font-weight:700}
+
+/* PenguCost 0.1.7 – multi-user catalog isolation and admin-managed AI profiles */
+.catalog-message{margin:-8px 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--muted);font-size:12px}
+.category-mini-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:2px}
+.ai-profile-chip{display:flex;align-items:center;gap:9px;padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:var(--panel-2);color:var(--accent)}
+.ai-profile-chip span{display:flex;flex-direction:column;gap:2px;color:var(--muted);font-size:10px}.ai-profile-chip strong{color:var(--text);font-size:12px}
+.ai-profile-list{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+.ai-profile-row{display:grid;grid-template-columns:minmax(0,1fr) auto 34px 34px;gap:9px;align-items:center;padding:11px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel-2)}
+.ai-profile-row>div{display:flex;flex-direction:column;gap:2px;min-width:0}.ai-profile-row strong{font-size:12px}.ai-profile-row span,.ai-profile-row small{color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.muted-pill{opacity:.62}.ai-profile-editor{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}.editor-title{display:flex;align-items:center;justify-content:space-between}.compact-form{padding:14px 0 0}
+@media(max-width:620px){.ai-profile-row{grid-template-columns:minmax(0,1fr) auto 34px 34px}.compact-form{grid-template-columns:1fr}.compact-form .span2{grid-column:auto}}

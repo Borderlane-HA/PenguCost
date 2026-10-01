@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.7
+
+- Enforced strict per-user ownership for expenses, dashboards, reminders and AI payloads. Administrators no longer see other users' cost data.
+- Global accounts and categories are managed by administrators and shared as templates with all users. Non-admin deletion now hides a template only for that user, with a restore option.
+- Added admin-managed AI profiles with provider presets for Ollama, OpenAI, Grok/xAI, Google Gemini, IONOS AI Model Hub, Claude/Anthropic and custom OpenAI-compatible endpoints.
+- Non-admin users can only select enabled AI profiles for analyses and cannot view or modify base URLs, API keys or model configuration.
+- Added native Anthropic Messages API support for Claude profiles while retaining OpenAI-compatible chat-completions for the other providers.
+- Made cancellation reminder lead time user-specific.
+- Fixed dashboard selection so all active expenses are selected initially and newly created expenses are automatically added without re-selecting previously excluded items.
+- Added safe migration of orphaned legacy expenses to the first administrator and migration of the former single AI configuration into a profile.
+
 ## 0.1.6
 
 ### Fixed
