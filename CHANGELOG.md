@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+- Replaced the one-shot AI analysis screen with the persistent **PenguCost AI Agent**: per-user conversations, follow-up chat, history and editable Brain memory.
+- AI requests now run as persisted background jobs; leaving the AI page no longer loses the running state or completed result.
+- Added guided AI start modes for a general recurring-finance check or a concrete monthly savings target.
+- Strengthened the AI Agent prompt with exact selected-income/expense/delta context, protected essential entries, realistic savings contribution/cumulative-gap logic and structured JSON finance context.
+- Reworked the AI data selector into a searchable modal with expense/income filters and collapsible category groups for large datasets.
+- Extended personal JSON export/import and administrator full backup/restore with AI conversations, messages and Brain memory.
+- Added a modern local SVG PenguCost favicon.
+- Simplified the dashboard year menu to year numbers only while keeping the real current year as the default after login.
+- Hardened deterministic history/forecast projection to continue from the latest effective renewal cycle, use known price phases and contract dates, and default newly enabled automatic renewal to a 12-month period until changed explicitly.
+- Administrators can create a missing global category directly while creating/editing an entry.
+- Changed cloning into **Use as template**: opening a clone creates only an unsaved draft, clears identity/contract-specific fields and does not imply a relationship to the source entry. Closing the modal with X or Cancel never creates data.
+- Hardened AI ownership checks so selected IDs are always revalidated against the authenticated user before model calls.
+
 ## 0.2.1
 
 - Added an explicit dashboard year selector while keeping the current year as the default view.

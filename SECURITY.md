@@ -21,14 +21,16 @@ Global accounts and categories can be hidden by a member without deleting them f
 
 AI profiles are managed only by administrators. Normal users can select enabled profiles for an analysis but do not receive configured base URLs or API-key state from the public profile endpoint. API keys are encrypted at rest using the local PenguCost encryption key.
 
-When an external provider is used, only the authenticated user's explicitly selected expense metadata is sent after that user starts an analysis. Ollama or another local endpoint can be used to keep AI traffic local.
+When an external provider is used, only the authenticated user's explicitly selected financial entries, that user's AI conversation history and that user's Brain context are supplied to the model. Selected entry IDs are revalidated server-side before every AI turn. Ollama or another local endpoint can be used to keep AI traffic local.
+
+AI conversations and Brain memory are stored per user in SQLite. A normal administrator cannot browse another user's conversations through the application UI/API; they are included only in the explicit privileged full-instance backup/restore path.
 
 ## Reporting
 
 For a public repository, add your preferred private vulnerability-reporting contact before the first public release.
 ## Export files
 
-Personal user exports contain that user's private recurring-cost and contract data. Administrator full exports are more sensitive: they contain all users' data, password hashes and AI API keys in a restorable form. Store full export JSON files like backups or secrets, do not commit them to Git, and transfer them only over trusted channels.
+Personal user exports contain that user's private recurring-cost and contract data plus that user's AI conversation history and Brain memory. Administrator full exports are more sensitive: they contain all users' data, password hashes and AI API keys in a restorable form. Store full export JSON files like backups or secrets, do not commit them to Git, and transfer them only over trusted channels.
 
 The normal administrator UI still does not expose another user's cost data. The full export is an explicit privileged backup/restore action and should only be used by a trusted instance administrator.
 

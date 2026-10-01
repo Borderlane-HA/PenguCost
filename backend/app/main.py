@@ -1,25 +1,26 @@
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
+import json
 from pathlib import Path
 from typing import Optional, Literal, Any
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Query
+from fastapi import FastAPI, Depends, HTTPException, Response, Query, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, inspect, text
 from sqlalchemy.orm import Session
 
-from .db import Base, engine, get_db
+from .db import Base, engine, get_db, SessionLocal
 from .models import (
     User, Expense, ExpensePrice, Account, Category, Setting, ReminderAction,
-    HiddenCatalogItem, AIProfile,
+    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain,
 )
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
-from .ai import analyze_costs
+from .ai import analyze_costs, chat_finances
 
-APP_VERSION = '0.2.1'
+APP_VERSION = '0.3.0'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -182,6 +183,27 @@ class AIAnalyzeIn(BaseModel):
     expense_ids: list[int] = []
     language: str = 'de'
     profile_id: Optional[int] = None
+
+
+class AIConversationIn(BaseModel):
+    profile_id: Optional[int] = None
+    mode: Literal['analysis', 'savings', 'chat'] = 'analysis'
+    target_savings: Optional[float] = Field(default=None, ge=0, le=1000000)
+    expense_ids: list[int] = []
+    title: Optional[str] = Field(default=None, max_length=180)
+
+
+class AIChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=12000)
+    profile_id: Optional[int] = None
+    expense_ids: list[int] = []
+    mode: Optional[Literal['analysis', 'savings', 'chat']] = None
+    target_savings: Optional[float] = Field(default=None, ge=0, le=1000000)
+    language: Literal['de', 'en'] = 'de'
+
+
+class AIBrainIn(BaseModel):
+    summary: str = Field(default='', max_length=12000)
 
 
 def current_user(uid: int = Depends(session_user_id), db: Session = Depends(get_db)):
@@ -521,7 +543,7 @@ def add_category(data: CategoryIn, _: User = Depends(require_admin), db: Session
     except Exception:
         db.rollback()
         raise HTTPException(409, 'Category already exists')
-    return {'id': x.id}
+    return {'id': x.id, 'name': x.name, 'icon': x.icon, 'color': x.color or '#5B5CF0'}
 
 
 @app.patch('/api/categories/{item_id}')
@@ -883,14 +905,18 @@ def export_user_data(user: User = Depends(current_user), db: Session = Depends(g
             if item: hidden_categories.append(item.name)
     expenses = list(db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.id)))
     reminders = list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id).order_by(ReminderAction.id)))
+    conversations = list(db.scalars(select(AIConversation).where(AIConversation.user_id == user.id).order_by(AIConversation.id)))
+    brain = db.get(AIBrain, user.id)
     return {
-        'format': 'pengucost-user-export', 'schema_version': 1, 'app_version': APP_VERSION,
+        'format': 'pengucost-user-export', 'schema_version': 2, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'user': {'username': user.username, 'display_name': user.display_name},
         'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
         'hidden_catalog': {'accounts': sorted(hidden_accounts), 'categories': sorted(hidden_categories)},
         'expenses': [_raw_expense(x) for x in expenses],
         'reminder_actions': [{'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in reminders],
+        'ai_brain': {'summary': brain.summary, 'updated_at': _iso(brain.updated_at)} if brain else None,
+        'ai_conversations': [{**_conversation_dict(c, db, True), 'profile_name': (db.get(AIProfile, c.profile_id).name if c.profile_id and db.get(AIProfile, c.profile_id) else None)} for c in conversations],
     }
 
 
@@ -902,6 +928,11 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
     if not isinstance(expenses_in, list):
         raise HTTPException(400, 'Invalid expenses payload')
     # Replace only this user's private data. Global admin catalogs and every other user's data remain untouched.
+    for c in list(db.scalars(select(AIConversation).where(AIConversation.user_id == user.id))):
+        for m in list(db.scalars(select(AIMessage).where(AIMessage.conversation_id == c.id))): db.delete(m)
+        db.delete(c)
+    old_brain = db.get(AIBrain, user.id)
+    if old_brain: db.delete(old_brain)
     expense_ids = list(db.scalars(select(Expense.id).where(Expense.created_by == user.id)))
     if expense_ids:
         for r in list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id))): db.delete(r)
@@ -952,6 +983,17 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
         new_expense_id = id_map.get(int(r.get('expense_id') or 0))
         if new_expense_id:
             db.add(ReminderAction(expense_id=new_expense_id, event_key=str(r.get('event_key') or '')[:160], action=str(r.get('action') or 'done')[:20], snooze_until=_date(r.get('snooze_until')), created_by=user.id, created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
+    brain = payload.get('ai_brain')
+    if isinstance(brain, dict) and brain.get('summary'):
+        db.add(AIBrain(user_id=user.id, summary=str(brain.get('summary') or '')[:12000], updated_at=_datetime(brain.get('updated_at'))))
+    profile_by_name = {x.name: x.id for x in db.scalars(select(AIProfile))}
+    for c in payload.get('ai_conversations') or []:
+        selected_ids = [id_map[int(i)] for i in (c.get('selected_expense_ids') or []) if str(i).isdigit() and int(i) in id_map]
+        profile_id = profile_by_name.get(c.get('profile_name')) if c.get('profile_name') else None
+        conv = AIConversation(user_id=user.id, profile_id=profile_id, title=str(c.get('title') or 'PenguCost AI')[:180], mode=str(c.get('mode') or 'analysis')[:24], target_savings=c.get('target_savings'), selected_expense_ids=json.dumps(selected_ids), status='idle', last_error='', created_at=_datetime(c.get('created_at')), updated_at=_datetime(c.get('updated_at')))
+        db.add(conv); db.flush()
+        for m in c.get('messages') or []:
+            db.add(AIMessage(conversation_id=conv.id, role=str(m.get('role') or 'user')[:20], content=str(m.get('content') or ''), created_at=_datetime(m.get('created_at'))))
     db.commit()
     return {'ok': True, 'imported_expenses': len(expenses_in), 'warnings': sorted(set(warnings))}
 
@@ -963,7 +1005,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     categories = list(db.scalars(select(Category).order_by(Category.id)))
     expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
     return {
-        'format': 'pengucost-admin-export', 'schema_version': 1, 'app_version': APP_VERSION,
+        'format': 'pengucost-admin-export', 'schema_version': 2, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'created_at': _iso(u.created_at)} for u in users],
         'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note} for x in accounts],
@@ -972,6 +1014,8 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
         'expenses': [_raw_expense(x) for x in expenses],
         'reminder_actions': [{'id': r.id, 'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_by': r.created_by, 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in db.scalars(select(ReminderAction).order_by(ReminderAction.id))],
         'ai_profiles': [{'id': x.id, 'name': x.name, 'provider': x.provider, 'base_url': x.base_url, 'model': x.model, 'api_key': decrypt_secret(x.api_key), 'enabled': x.enabled, 'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIProfile).order_by(AIProfile.id))],
+        'ai_conversations': [{**_conversation_dict(x, db, True), 'user_id': x.user_id} for x in db.scalars(select(AIConversation).order_by(AIConversation.id))],
+        'ai_brains': [{'user_id': x.user_id, 'summary': x.summary, 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIBrain).order_by(AIBrain.user_id))],
         'settings': [{'key': x.key, 'value': x.value} for x in db.scalars(select(Setting).order_by(Setting.key))],
     }
 
@@ -987,7 +1031,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     # Destructive full restore. Order matters because expenses reference catalogs/users.
     # Detach the authenticated admin object so an imported user with the same primary key can be inserted cleanly.
     db.expunge(admin)
-    for table in ('reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
+    for table in ('ai_messages', 'ai_conversations', 'ai_brains', 'reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
         db.execute(text(f'DELETE FROM {table}'))
     db.flush()
     for u in users_in:
@@ -1008,6 +1052,14 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
         db.add(ReminderAction(id=int(r['id']), expense_id=int(r['expense_id']), event_key=str(r.get('event_key') or ''), action=str(r.get('action') or 'done'), snooze_until=_date(r.get('snooze_until')), created_by=r.get('created_by'), created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
     for x in payload.get('ai_profiles') or []:
         db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
+    db.flush()
+    for x in payload.get('ai_conversations') or []:
+        conv = AIConversation(id=int(x['id']), user_id=int(x['user_id']), profile_id=x.get('profile_id'), title=str(x.get('title') or 'PenguCost AI')[:180], mode=str(x.get('mode') or 'analysis')[:24], target_savings=x.get('target_savings'), selected_expense_ids=json.dumps(x.get('selected_expense_ids') or []), status='idle', last_error='', created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at')))
+        db.add(conv); db.flush()
+        for m in x.get('messages') or []:
+            db.add(AIMessage(id=int(m['id']) if m.get('id') else None, conversation_id=conv.id, role=str(m.get('role') or 'user')[:20], content=str(m.get('content') or ''), created_at=_datetime(m.get('created_at'))))
+    for x in payload.get('ai_brains') or []:
+        db.add(AIBrain(user_id=int(x['user_id']), summary=str(x.get('summary') or '')[:12000], updated_at=_datetime(x.get('updated_at'))))
     for x in payload.get('settings') or []:
         db.add(Setting(key=str(x['key']), value=str(x.get('value') or '')))
     db.commit()
@@ -1077,6 +1129,184 @@ def delete_ai_profile(profile_id: int, _: User = Depends(require_admin), db: Ses
     db.delete(x)
     db.commit()
     return {'ok': True}
+
+
+def _json_ids(value: str) -> list[int]:
+    try:
+        raw = json.loads(value or '[]')
+        return [int(x) for x in raw if str(x).isdigit()]
+    except Exception:
+        return []
+
+
+def _conversation_dict(x: AIConversation, db: Session, include_messages: bool = False) -> dict[str, Any]:
+    data = {
+        'id': x.id, 'profile_id': x.profile_id, 'title': x.title, 'mode': x.mode,
+        'target_savings': x.target_savings, 'selected_expense_ids': _json_ids(x.selected_expense_ids),
+        'status': x.status, 'last_error': x.last_error, 'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at),
+    }
+    if include_messages:
+        data['messages'] = [
+            {'id': m.id, 'role': m.role, 'content': m.content, 'created_at': _iso(m.created_at)}
+            for m in db.scalars(select(AIMessage).where(AIMessage.conversation_id == x.id).order_by(AIMessage.id))
+        ]
+    return data
+
+
+def _owned_conversation(db: Session, user_id: int, conversation_id: int) -> AIConversation:
+    x = db.get(AIConversation, conversation_id)
+    if not x or x.user_id != user_id:
+        raise HTTPException(404, 'AI conversation not found')
+    return x
+
+
+def _ai_finance_payload(db: Session, user_id: int, requested_ids: list[int]) -> dict[str, Any]:
+    entries = [x for x in db.scalars(select(Expense).where(Expense.created_by == user_id)) if is_effectively_active(x)]
+    if requested_ids:
+        selected = set(requested_ids)
+        entries = [x for x in entries if x.id in selected]
+    rows = [expense_dict(x) for x in entries]
+    expense_rows = [x for x in rows if x.get('entry_type') != 'income']
+    income_rows = [x for x in rows if x.get('entry_type') == 'income']
+    monthly_expenses = round(sum(x['monthly_equivalent'] for x in expense_rows), 2)
+    monthly_income = round(sum(x['monthly_equivalent'] for x in income_rows), 2)
+    return {
+        'monthly_expenses': monthly_expenses,
+        'yearly_expenses': round(sum(x['yearly_equivalent'] for x in expense_rows), 2),
+        'monthly_income': monthly_income,
+        'yearly_income': round(sum(x['yearly_equivalent'] for x in income_rows), 2),
+        'monthly_delta': round(monthly_income - monthly_expenses, 2),
+        'entries': rows,
+    }
+
+
+def _update_brain_memory(db: Session, user_id: int, mode: str, target: float | None, user_message: str, assistant_message: str):
+    row = db.get(AIBrain, user_id)
+    if not row:
+        row = AIBrain(user_id=user_id, summary='')
+        db.add(row)
+    stamp = date.today().isoformat()
+    goal = f' | Sparziel {target:.2f} EUR/Monat' if target is not None else ''
+    question = ' '.join(user_message.strip().split())[:280]
+    answer = ' '.join(assistant_message.replace('#', ' ').replace('*', ' ').split())[:520]
+    entry = f'{stamp} | {mode}{goal}\nFrage: {question}\nErkenntnis: {answer}'
+    previous = [x.strip() for x in (row.summary or '').split('\n\n') if x.strip()]
+    row.summary = '\n\n'.join((previous + [entry])[-8:])[-8000:]
+    row.updated_at = datetime.utcnow()
+
+
+async def _run_ai_conversation_turn(conversation_id: int, user_id: int, user_message: str, language: str):
+    db = SessionLocal()
+    try:
+        conv = db.get(AIConversation, conversation_id)
+        if not conv or conv.user_id != user_id:
+            return
+        profile = db.get(AIProfile, conv.profile_id) if conv.profile_id else db.scalar(select(AIProfile).where(AIProfile.enabled == True).order_by(AIProfile.id))
+        if not profile or not profile.enabled:
+            conv.status = 'error'; conv.last_error = 'No enabled AI profile is available'; db.commit(); return
+        finance = _ai_finance_payload(db, user_id, _json_ids(conv.selected_expense_ids))
+        brain = db.get(AIBrain, user_id)
+        history_rows = list(db.scalars(select(AIMessage).where(AIMessage.conversation_id == conversation_id).order_by(AIMessage.id)))
+        # The newest user message is supplied separately to avoid sending it twice.
+        history = [{'role': m.role, 'content': m.content} for m in history_rows[:-1] if m.role in {'user', 'assistant'}]
+        reply = await chat_finances(
+            profile.provider, profile.base_url, decrypt_secret(profile.api_key), profile.model,
+            finance, brain.summary if brain else '', history, user_message, language,
+            conv.mode, conv.target_savings,
+        )
+        db.add(AIMessage(conversation_id=conversation_id, role='assistant', content=reply))
+        conv.status = 'idle'; conv.last_error = ''; conv.updated_at = datetime.utcnow()
+        _update_brain_memory(db, user_id, conv.mode, conv.target_savings, user_message, reply)
+        db.commit()
+    except Exception as e:
+        try:
+            conv = db.get(AIConversation, conversation_id)
+            if conv:
+                conv.status = 'error'; conv.last_error = str(e)[:2000]; conv.updated_at = datetime.utcnow(); db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()
+
+
+@app.get('/api/ai/conversations')
+def ai_conversations(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(AIConversation).where(AIConversation.user_id == user.id).order_by(AIConversation.updated_at.desc(), AIConversation.id.desc()))
+    return [_conversation_dict(x, db, False) for x in rows]
+
+
+@app.post('/api/ai/conversations')
+def create_ai_conversation(data: AIConversationIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    profile = db.get(AIProfile, data.profile_id) if data.profile_id else db.scalar(select(AIProfile).where(AIProfile.enabled == True).order_by(AIProfile.id))
+    if not profile or not profile.enabled:
+        raise HTTPException(400, 'No enabled AI profile is available')
+    owned_ids = set(db.scalars(select(Expense.id).where(Expense.created_by == user.id)))
+    selected_ids = [x for x in data.expense_ids if x in owned_ids]
+    label = data.title or ('Sparziel' if data.mode == 'savings' else 'Kostencheck' if data.mode == 'analysis' else 'PenguCost Chat')
+    x = AIConversation(user_id=user.id, profile_id=profile.id, title=label[:180], mode=data.mode, target_savings=data.target_savings, selected_expense_ids=json.dumps(selected_ids), status='idle')
+    db.add(x); db.commit(); db.refresh(x)
+    return _conversation_dict(x, db, True)
+
+
+@app.get('/api/ai/conversations/{conversation_id}')
+def get_ai_conversation(conversation_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _conversation_dict(_owned_conversation(db, user.id, conversation_id), db, True)
+
+
+@app.delete('/api/ai/conversations/{conversation_id}')
+def delete_ai_conversation(conversation_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    x = _owned_conversation(db, user.id, conversation_id)
+    if x.status == 'running':
+        raise HTTPException(409, 'AI conversation is still running')
+    for m in list(db.scalars(select(AIMessage).where(AIMessage.conversation_id == x.id))):
+        db.delete(m)
+    db.delete(x); db.commit()
+    return {'ok': True}
+
+
+@app.post('/api/ai/conversations/{conversation_id}/messages')
+def send_ai_message(conversation_id: int, data: AIChatIn, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    x = _owned_conversation(db, user.id, conversation_id)
+    if x.status == 'running':
+        raise HTTPException(409, 'AI conversation is already running')
+    if data.profile_id is not None:
+        p = db.get(AIProfile, data.profile_id)
+        if not p or not p.enabled:
+            raise HTTPException(400, 'AI profile is not enabled')
+        x.profile_id = p.id
+    owned_ids = set(db.scalars(select(Expense.id).where(Expense.created_by == user.id)))
+    if data.expense_ids:
+        x.selected_expense_ids = json.dumps([i for i in data.expense_ids if i in owned_ids])
+    if data.mode is not None:
+        x.mode = data.mode
+    if data.target_savings is not None or x.mode != 'savings':
+        x.target_savings = data.target_savings
+    db.add(AIMessage(conversation_id=x.id, role='user', content=data.message.strip()))
+    if len(list(db.scalars(select(AIMessage.id).where(AIMessage.conversation_id == x.id)))) <= 1:
+        clean = ' '.join(data.message.strip().split())
+        x.title = clean[:72] + ('…' if len(clean) > 72 else '')
+    x.status = 'running'; x.last_error = ''; x.updated_at = datetime.utcnow()
+    db.commit()
+    background_tasks.add_task(_run_ai_conversation_turn, x.id, user.id, data.message.strip(), data.language)
+    return _conversation_dict(x, db, True)
+
+
+@app.get('/api/ai/brain')
+def get_ai_brain(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    x = db.get(AIBrain, user.id)
+    return {'summary': x.summary if x else '', 'updated_at': _iso(x.updated_at) if x else None}
+
+
+@app.put('/api/ai/brain')
+def put_ai_brain(data: AIBrainIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    x = db.get(AIBrain, user.id)
+    if not x:
+        x = AIBrain(user_id=user.id, summary=data.summary.strip())
+        db.add(x)
+    else:
+        x.summary = data.summary.strip(); x.updated_at = datetime.utcnow()
+    db.commit()
+    return {'summary': x.summary, 'updated_at': _iso(x.updated_at)}
 
 
 @app.post('/api/ai/analyze')

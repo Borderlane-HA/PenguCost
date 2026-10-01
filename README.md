@@ -17,9 +17,10 @@ The goal is deliberately narrower than a classic budgeting app: **make recurring
 - **Multi-user privacy** — local Admin/Member accounts with strict per-user cost, contract, dashboard, reminder and AI-data isolation
 - **JSON export/import** — personal backups for each user plus a complete administrator export/restore of the whole instance
 - **German & English** — per-user language preference with an in-app switch
-- **Fast cloning** — clone an existing expense/contract and edit the copy
+- **Template cloning** — use any existing entry as an unsaved template; nothing is created until the new entry is explicitly saved
 - **Themes** — System, Light, Midnight, Nordic, Graphite and Emerald with flash-free theme loading
-- **Optional PenguCost AI** — admin-managed profiles for Ollama, OpenAI, Grok/xAI, Gemini, IONOS AI Model Hub, Claude and custom endpoints
+- **Local visual assets** — modern PenguCost SVG favicon and UI assets ship with the app; no external CDN is required
+- **PenguCost AI Agent** — persistent per-user chat history, editable Brain memory, background analysis jobs and admin-managed profiles for Ollama, OpenAI, Grok/xAI, Gemini, IONOS AI Model Hub, Claude and custom endpoints
 - **Local-first & offline capable** — no CDN, no telemetry, no cloud dependency for the core app
 - **Docker & Proxmox** — Docker Compose plus a Proxmox VE 8/9 LXC installer
 - **Backup-friendly** — all persistent state lives in one Docker volume
@@ -48,13 +49,14 @@ This makes unlike billing cycles directly comparable while retaining the real pa
 - Separate expense and income breakdowns by category
 - Interactive selector that instantly changes all calculations and charts
 - Upcoming cancellation and contract-end timeline
+- Year picker with current-year default, automatically available history and deterministic future projections from known contract/price data
 
 ### Income & Expenses
 Each item is explicitly marked as **Expense** or **Income** and can contain:
 - Name and provider
 - Amount and currency
 - Billing interval / custom month interval
-- Category
+- Category (administrators can create a missing global category directly from the entry form)
 - Account / payment route
 - Contract start
 - Minimum term in months (optional helper)
@@ -86,23 +88,27 @@ Each reminder can be handled directly:
 This state is stored in SQLite and therefore survives restarts and upgrades.
 
 ### Export & import
-Every user can export a portable JSON file containing their own expenses/contracts, historical price phases, hidden global accounts/categories, reminder state, theme, language and saved AI-analysis prompt. Import replaces only that user's private PenguCost data; global catalogs and other users are untouched.
+Every user can export a portable JSON file containing their own expenses/contracts, historical price phases, hidden global accounts/categories, reminder state, theme, language, **AI chat history and Brain memory**. Import replaces only that user's private PenguCost data; global catalogs and other users are untouched.
 
-Administrators additionally have a **complete instance export/import**. It contains users (password hashes), all user-owned expenses, global catalogs, settings and AI profiles. AI API keys are exported in a restorable form so a full export must be treated like a sensitive backup. A full import replaces the PenguCost database and is intended for restore/migration.
+Administrators additionally have a **complete instance export/import**. It contains users (password hashes), all user-owned expenses, global catalogs, settings, AI profiles, AI conversation history and per-user Brain memory. AI API keys are exported in a restorable form so a full export must be treated like a sensitive backup. A full import replaces the PenguCost database and is intended for restore/migration.
 
 ### Languages
 PenguCost ships with German and English UI language packs. The selected language is stored per user under **Settings → Language** and follows the user across browsers after login.
 
-### AI Analysis
+### PenguCost AI Agent
 Administrators create one or more AI profiles in Settings and decide which profiles are enabled for users. Provider presets are available for **Ollama, OpenAI, Grok/xAI, Google Gemini, IONOS AI Model Hub, Claude/Anthropic and custom OpenAI-compatible endpoints**.
 
-Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. The AI page starts with **all current income and expense entries belonging to the current user selected**. PenguCost validates ownership server-side and never adds another user's data to an AI payload. The model receives separate income/expense totals plus the monthly delta. The per-user analysis prompt is saved and included in personal exports. The expense notes field is explicitly treated as AI context (purpose, benefits and constraints). Example goals:
+Members can only choose an enabled profile. They cannot see or edit endpoints, API keys or provider configuration. The AI Agent is strictly scoped to the signed-in user and provides:
 
-> I want to reduce monthly recurring costs by €80 without touching essential contracts.
+- persistent per-user chat conversations and history
+- a personal editable **Brain** that carries useful context across conversations
+- background analysis jobs: navigation away from the page does not discard a running request; returning shows the running state or stored result
+- two guided starts: **simple recurring-cost check** or a concrete **monthly savings target**
+- a compact data picker with search, income/expense filters and collapsible category groups instead of an ever-growing chip list
+- follow-up chat after the initial analysis without losing the selected financial context
+- explicit use of **Notes (for AI analysis)** as purpose/benefit/constraint context
 
-> Which contracts need attention soon and where are the largest optional costs?
-
-The system prompt explicitly tells the model **not to invent market prices or offers**. Claude uses the native Anthropic Messages API; the other presets use OpenAI-compatible chat completions. External AI is optional; Ollama can keep the analysis local.
+All selected entry IDs are revalidated server-side against the authenticated owner before financial data is sent to the model. Chat history and Brain memory are included in the user's JSON export/import. The system prompt tells the model **not to invent market prices or offers** and not to expose chain-of-thought. Claude uses the native Anthropic Messages API; the other presets use OpenAI-compatible chat completions. External AI is optional; Ollama can keep AI traffic local.
 
 ## Docker installation
 
@@ -222,7 +228,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.2.1
+./scripts/build-offline-bundle.sh 0.3.0
 ```
 
 This creates:
@@ -250,7 +256,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update latest
 Or update to a specific release tag:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.2.1
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.3.0
 ```
 
 The persistent `/data` Docker volume is not replaced by an update.
@@ -268,7 +274,7 @@ For a Proxmox deployment, a normal Proxmox LXC backup additionally protects the 
 
 As administrator open **Settings → AI providers & models**. Add as many profiles as required and choose a provider preset, profile name, base URL, model and API key. Each profile can be enabled or disabled for normal users independently.
 
-Normal users only see the profile name, provider and model in **AI Analysis**. Base URLs and API keys remain admin-only. API keys are encrypted before they are stored in the local database. PenguCost itself does not ship a cloud account or relay service.
+Normal users only see the profile name, provider and model in the **AI Agent**. Base URLs and API keys remain admin-only. API keys are encrypted before they are stored in the local database. PenguCost itself does not ship a cloud account or relay service.
 
 ## Architecture
 

@@ -111,6 +111,37 @@ class AIProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AIConversation(Base):
+    __tablename__ = 'ai_conversations'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey('ai_profiles.id'), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(180), default='PenguCost AI')
+    mode: Mapped[str] = mapped_column(String(24), default='analysis')
+    target_savings: Mapped[float | None] = mapped_column(Float, nullable=True)
+    selected_expense_ids: Mapped[str] = mapped_column(Text, default='[]')
+    status: Mapped[str] = mapped_column(String(20), default='idle', index=True)
+    last_error: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AIMessage(Base):
+    __tablename__ = 'ai_messages'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey('ai_conversations.id'), index=True)
+    role: Mapped[str] = mapped_column(String(20), default='user')
+    content: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AIBrain(Base):
+    __tablename__ = 'ai_brains'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    summary: Mapped[str] = mapped_column(Text, default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
