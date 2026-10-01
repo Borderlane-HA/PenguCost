@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6
+
+- Fix the TypeScript production build in the cloned-cancellation deadline logic (`TS2367`).
+- Keep clone deadline recalculation behavior unchanged while using the correctly typed nullable numeric cancellation notice value.
+- Fix validated against the failing typed expression; the complete local production build still depends on npm dependencies being available.
+
 ## 0.4.5
 
 - Fix cloning of contract cancellation dates: cloned deadlines are now recalculated from contract end and cancellation notice instead of remaining tied to the original entry.

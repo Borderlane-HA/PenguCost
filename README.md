@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.5
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.6
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards.
