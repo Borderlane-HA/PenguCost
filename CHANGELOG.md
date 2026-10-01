@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+- Added recurring **income** alongside expenses using a backwards-compatible `entry_type` field. Existing entries migrate automatically as expenses.
+- Fixed overview selection so cancelled-but-still-running contracts remain in current totals until their effective contract end; only paused/ended entries are excluded.
+- Reworked the overview into expense, income and monthly-delta metrics.
+- Added an income-vs-expense 12-month chart with an explicit delta line.
+- Added separate category breakdowns for expenses and income.
+- Added expense/income grouping to the interactive dashboard selector.
+- Added type filtering and a type column to the Income & Expenses list.
+- Annual/quarterly entries are normalized into monthly equivalents in the recurring cash-flow chart, so yearly subscriptions remain visible every month.
+- AI analysis now receives only the current user's selected entries, including explicit income/expense types, separate totals and delta.
+- Reworked the AI system prompt for concrete, structured, decision-ready Markdown output without invented market prices.
+- Added richer AI result rendering with headings and bullet lists.
+- Removed the explanatory user-permission text below the AI analysis button.
+
+
 ## 0.1.9
 
 - Added per-user German/English language packs with a user-level language switch.

@@ -19,7 +19,7 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs
 
-APP_VERSION = '0.1.9'
+APP_VERSION = '0.2.0'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -28,6 +28,8 @@ def migrate_schema():
     # create_all does not add columns to existing SQLite tables. Keep upgrades in-place.
     columns = {c['name'] for c in inspect(engine).get_columns('expenses')}
     statements = []
+    if 'entry_type' not in columns:
+        statements.append("ALTER TABLE expenses ADD COLUMN entry_type VARCHAR(16) DEFAULT 'expense'")
     if 'minimum_term_months' not in columns:
         statements.append('ALTER TABLE expenses ADD COLUMN minimum_term_months INTEGER')
     if 'renewal_period_months' not in columns:
@@ -44,6 +46,7 @@ def migrate_schema():
             conn.execute(text("ALTER TABLE categories ADD COLUMN color VARCHAR(16) DEFAULT '#5B5CF0'"))
     with engine.begin() as conn:
         conn.execute(text('CREATE INDEX IF NOT EXISTS ix_expenses_created_by ON expenses (created_by)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_expenses_entry_type ON expenses (entry_type)'))
 
 
 migrate_schema()
@@ -118,6 +121,7 @@ class CategoryPatch(BaseModel):
 class ExpenseIn(BaseModel):
     name: str
     provider: str = ''
+    entry_type: Literal['expense', 'income'] = 'expense'
     amount: float = Field(gt=0)
     currency: str = 'EUR'
     billing_interval: str = 'monthly'
@@ -224,7 +228,9 @@ def effective_contract_end(x: Expense, today: date) -> date | None:
 
 def is_effectively_active(x: Expense, when: date | None = None) -> bool:
     when = when or date.today()
-    if x.status != 'active':
+    # A cancelled contract still creates cash flow until its effective end.
+    # Only paused/ended entries are excluded from current reporting.
+    if x.status in {'paused', 'ended'}:
         return False
     end = effective_contract_end(x, when)
     return not end or end >= when
@@ -247,7 +253,7 @@ def expense_dict(x: Expense, as_of: date | None = None):
     if next_end and x.cancellation_notice_days is not None and (not next_cancel or next_cancel < today or next_end != x.contract_end):
         next_cancel = next_end - timedelta(days=max(0, x.cancellation_notice_days))
     return {
-        'id': x.id, 'name': x.name, 'provider': x.provider, 'amount': current_amount, 'currency': x.currency,
+        'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': current_amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': months, 'monthly_equivalent': monthly,
         'yearly_equivalent': yearly, 'category_id': x.category_id, 'category': x.category.name if x.category else None,
         'category_color': x.category.color if x.category else '#7B8798', 'account_id': x.account_id,
@@ -633,7 +639,7 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
     source = owned_expense(db, user, item_id)
     suffix = ' (Copy)' if language_for(db, user) == 'en' else ' (Kopie)'
     clone = Expense(
-        name=(source.name + suffix)[:160], provider=source.provider, amount=source.amount, currency=source.currency,
+        name=(source.name + suffix)[:160], provider=source.provider, entry_type=(source.entry_type or 'expense'), amount=source.amount, currency=source.currency,
         billing_interval=source.billing_interval, interval_months=source.interval_months,
         minimum_term_months=source.minimum_term_months, renewal_period_months=source.renewal_period_months,
         category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
@@ -652,13 +658,19 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
 
 @app.get('/api/dashboard')
 def dashboard(ids: str = Query(default=''), user: User = Depends(current_user), db: Session = Depends(get_db)):
-    items = [x for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.status == 'active')) if is_effectively_active(x)]
+    items = [x for x in db.scalars(select(Expense).where(Expense.created_by == user.id)) if is_effectively_active(x)]
     if ids:
         selected = {int(x) for x in ids.split(',') if x.isdigit()}
         items = [x for x in items if x.id in selected]
     rows = [expense_dict(x) for x in items]
-    monthly = round(sum(x['monthly_equivalent'] for x in rows), 2)
-    yearly = round(sum(x['yearly_equivalent'] for x in rows), 2)
+    expense_rows = [x for x in rows if x.get('entry_type') != 'income']
+    income_rows = [x for x in rows if x.get('entry_type') == 'income']
+    monthly_expenses = round(sum(x['monthly_equivalent'] for x in expense_rows), 2)
+    yearly_expenses = round(sum(x['yearly_equivalent'] for x in expense_rows), 2)
+    monthly_income = round(sum(x['monthly_equivalent'] for x in income_rows), 2)
+    yearly_income = round(sum(x['yearly_equivalent'] for x in income_rows), 2)
+    monthly = monthly_expenses
+    yearly = yearly_expenses
     categories = {}
     category_colors = {}
     for x in rows:
@@ -667,10 +679,10 @@ def dashboard(ids: str = Query(default=''), user: User = Depends(current_user), 
         category_colors[key] = x.get('category_color') or '#7B8798'
     today = date.today()
     soon = today + timedelta(days=60)
-    expiring = [x for x in rows if x['effective_contract_end'] and today <= x['effective_contract_end'] <= soon]
-    cancellation = [x for x in rows if x['effective_cancellation_date'] and today <= x['effective_cancellation_date'] <= soon]
-    upcoming = [x for x in rows if x['next_due_date'] and today <= x['next_due_date'] <= today + timedelta(days=31)]
-    return {'monthly_total': monthly, 'yearly_total': yearly, 'count': len(rows), 'categories': categories, 'category_colors': category_colors, 'expiring': expiring, 'cancellation_due': cancellation, 'upcoming_payments': upcoming}
+    expiring = [x for x in expense_rows if x['effective_contract_end'] and today <= x['effective_contract_end'] <= soon]
+    cancellation = [x for x in expense_rows if x['effective_cancellation_date'] and today <= x['effective_cancellation_date'] <= soon]
+    upcoming = [x for x in expense_rows if x['next_due_date'] and today <= x['next_due_date'] <= today + timedelta(days=31)]
+    return {'monthly_total': monthly, 'yearly_total': yearly, 'monthly_expenses': monthly_expenses, 'yearly_expenses': yearly_expenses, 'monthly_income': monthly_income, 'yearly_income': yearly_income, 'monthly_delta': round(monthly_income-monthly_expenses,2), 'yearly_delta': round(yearly_income-yearly_expenses,2), 'count': len(rows), 'categories': categories, 'category_colors': category_colors, 'expiring': expiring, 'cancellation_due': cancellation, 'upcoming_payments': upcoming}
 
 
 @app.get('/api/settings/reminders')
@@ -756,7 +768,7 @@ def reminders(user: User = Depends(current_user), db: Session = Depends(get_db))
     today = date.today()
     days = reminder_days_for(db, user)
     result = []
-    for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.status == 'active').order_by(Expense.name)):
+    for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.entry_type == 'expense').order_by(Expense.name)):
         if not is_effectively_active(x, today):
             continue
         item = reminder_event(x, today, days)
@@ -827,7 +839,7 @@ def _datetime(value):
 
 def _raw_expense(x: Expense) -> dict[str, Any]:
     return {
-        'id': x.id, 'name': x.name, 'provider': x.provider, 'amount': x.amount, 'currency': x.currency,
+        'id': x.id, 'name': x.name, 'provider': x.provider, 'entry_type': (x.entry_type or 'expense'), 'amount': x.amount, 'currency': x.currency,
         'billing_interval': x.billing_interval, 'interval_months': x.interval_months,
         'minimum_term_months': x.minimum_term_months, 'renewal_period_months': x.renewal_period_months,
         'category_id': x.category_id, 'category_name': x.category.name if x.category else None,
@@ -844,7 +856,8 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
 
 def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, account_id: int | None) -> Expense:
     return Expense(
-        name=str(row.get('name') or 'Imported expense')[:160], provider=str(row.get('provider') or '')[:160],
+        name=str(row.get('name') or 'Imported entry')[:160], provider=str(row.get('provider') or '')[:160],
+        entry_type=('income' if row.get('entry_type') == 'income' else 'expense'),
         amount=float(row.get('amount') or 0), currency=str(row.get('currency') or 'EUR')[:8],
         billing_interval=str(row.get('billing_interval') or 'monthly')[:20], interval_months=max(1, int(row.get('interval_months') or 1)),
         minimum_term_months=row.get('minimum_term_months'), renewal_period_months=row.get('renewal_period_months'),
@@ -1071,14 +1084,21 @@ async def ai_analyze(data: AIAnalyzeIn, user: User = Depends(current_user), db: 
     profile = db.get(AIProfile, data.profile_id) if data.profile_id else db.scalar(select(AIProfile).where(AIProfile.enabled == True).order_by(AIProfile.id))
     if not profile or not profile.enabled:
         raise HTTPException(400, 'No enabled AI profile is available')
-    rows = [expense_dict(x) for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.status == 'active')) if is_effectively_active(x)]
+    rows = [expense_dict(x) for x in db.scalars(select(Expense).where(Expense.created_by == user.id)) if is_effectively_active(x)]
     if data.expense_ids:
         selected = set(data.expense_ids)
         rows = [x for x in rows if x['id'] in selected]
+    expense_rows = [x for x in rows if x.get('entry_type') != 'income']
+    income_rows = [x for x in rows if x.get('entry_type') == 'income']
+    monthly_expenses = round(sum(x['monthly_equivalent'] for x in expense_rows), 2)
+    monthly_income = round(sum(x['monthly_equivalent'] for x in income_rows), 2)
     summary = {
-        'monthly_total': round(sum(x['monthly_equivalent'] for x in rows), 2),
-        'yearly_total': round(sum(x['yearly_equivalent'] for x in rows), 2),
-        'expenses': rows,
+        'monthly_expenses': monthly_expenses,
+        'yearly_expenses': round(sum(x['yearly_equivalent'] for x in expense_rows), 2),
+        'monthly_income': monthly_income,
+        'yearly_income': round(sum(x['yearly_equivalent'] for x in income_rows), 2),
+        'monthly_delta': round(monthly_income - monthly_expenses, 2),
+        'entries': rows,
     }
     try:
         result = await analyze_costs(profile.provider, profile.base_url, decrypt_secret(profile.api_key), profile.model, summary, data.goal or ai_prompt_for(db, user), data.language if data.language in {'de', 'en'} else language_for(db, user))

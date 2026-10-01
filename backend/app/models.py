@@ -46,6 +46,7 @@ class Expense(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(160), index=True)
     provider: Mapped[str] = mapped_column(String(160), default='')
+    entry_type: Mapped[str] = mapped_column(String(16), default='expense', index=True)
     amount: Mapped[float] = mapped_column(Float)
     currency: Mapped[str] = mapped_column(String(8), default='EUR')
     billing_interval: Mapped[str] = mapped_column(String(20), default='monthly')

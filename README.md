@@ -1,19 +1,19 @@
 # PenguCost 🐧💶
 
-**Know your fixed costs.** PenguCost is a self-hosted, local-first dashboard for subscriptions, contracts, insurance, energy, utilities and every other recurring expense.
+**Know your recurring finances.** PenguCost is a self-hosted, local-first dashboard for recurring expenses, income, subscriptions, contracts, insurance, energy, utilities and other regular cash flows.
 
 The goal is deliberately narrower than a classic budgeting app: **make recurring costs understandable, comparable and actionable** — without turning personal finance into accounting work.
 
 ## Highlights
 
-- **Recurring cost management** — monthly, quarterly, half-yearly, yearly or custom billing cycles
+- **Income & expense management** — recurring income and expenses with monthly, quarterly, half-yearly, yearly or custom cycles
 - **Normalized cost view** — every item is converted to monthly and yearly equivalents
 - **Contract lifecycle** — contract start, minimum term, exact/under-year contract end, cancellation deadline, notice period and configurable renewal period
 - **Actionable reminders** — notification bell with configurable lead time, done/snooze/cancel actions and automatic-renewal warnings
 - **Accounts & categories** — administrator-managed global templates; members can hide entries only for their own view
-- **Interactive analysis** — all of your active costs are selected by default; click individual subscriptions/contracts on or off and all totals/charts update immediately
+- **Interactive cash-flow analysis** — all current user-owned entries are selected by default; toggle individual income/expense items and totals/charts update immediately
 - **Historical price phases** — price changes are effective from a chosen date and never rewrite past months
-- **Annual payment forecast** — chart actual expected payment months where a next due date is known, using the price valid at each payment date
+- **Income vs. expense chart** — normalized monthly income, expenses and delta make recurring deficits/surpluses immediately visible
 - **Multi-user privacy** — local Admin/Member accounts with strict per-user cost, contract, dashboard, reminder and AI-data isolation
 - **JSON export/import** — personal backups for each user plus a complete administrator export/restore of the whole instance
 - **German & English** — per-user language preference with an in-app switch
@@ -28,7 +28,7 @@ The goal is deliberately narrower than a classic budgeting app: **make recurring
 
 Examples:
 
-| Expense | Billing | Stored amount | Monthly equivalent | Yearly equivalent |
+| Entry | Billing | Stored amount | Monthly equivalent | Yearly equivalent |
 |---|---:|---:|---:|---:|
 | ChatGPT Plus | monthly | €22.90 | €22.90 | €274.80 |
 | Car insurance | yearly | €840.00 | €70.00 | €840.00 |
@@ -39,17 +39,18 @@ This makes unlike billing cycles directly comparable while retaining the real pa
 ## Screens / Information Architecture
 
 ### Overview
-- Monthly equivalent total
-- Yearly equivalent total
-- Number of active contracts
-- Deadlines in the next 60 days
-- 12-month payment forecast
-- Cost breakdown by category
-- Interactive expense selector that instantly changes all calculations and charts
+- Monthly recurring expenses
+- Monthly recurring income
+- Monthly delta (surplus/deficit)
+- Yearly equivalents
+- Number of current contracts
+- Income-vs-expense 12-month comparison
+- Separate expense and income breakdowns by category
+- Interactive selector that instantly changes all calculations and charts
 - Upcoming cancellation and contract-end timeline
 
-### Costs & Contracts
-Each item can contain:
+### Income & Expenses
+Each item is explicitly marked as **Expense** or **Income** and can contain:
 - Name and provider
 - Amount and currency
 - Billing interval / custom month interval
@@ -95,7 +96,7 @@ PenguCost ships with German and English UI language packs. The selected language
 ### AI Analysis
 Administrators create one or more AI profiles in Settings and decide which profiles are enabled for users. Provider presets are available for **Ollama, OpenAI, Grok/xAI, Google Gemini, IONOS AI Model Hub, Claude/Anthropic and custom OpenAI-compatible endpoints**.
 
-Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. The AI page has its own cost selector and starts with **all active expenses belonging to the current user selected**. PenguCost validates ownership server-side and never adds another user's expenses to an AI payload. The per-user analysis prompt is saved and included in personal exports. The expense notes field is explicitly treated as AI context (purpose, benefits and constraints). Example goals:
+Members can only choose an enabled profile and start an analysis. They cannot see or edit the endpoint, API key or provider configuration. The AI page starts with **all current income and expense entries belonging to the current user selected**. PenguCost validates ownership server-side and never adds another user's data to an AI payload. The model receives separate income/expense totals plus the monthly delta. The per-user analysis prompt is saved and included in personal exports. The expense notes field is explicitly treated as AI context (purpose, benefits and constraints). Example goals:
 
 > I want to reduce monthly recurring costs by €80 without touching essential contracts.
 
@@ -221,7 +222,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.9
+./scripts/build-offline-bundle.sh 0.2.0
 ```
 
 This creates:
