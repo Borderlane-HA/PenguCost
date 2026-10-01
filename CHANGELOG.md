@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Fix AI Agent compatibility with local/Ollama chat templates that could ignore FINANCE_DATA_JSON when it was sent in an earlier conversation turn.
+- Send the selected current-user finance payload together with the active user request in the latest user message.
+- Add FINANCE_ENTRY_COUNT and an explicit guard that prevents models from claiming the payload is absent when entries are present.
+- Add one automatic single-turn retry when a model explicitly reports that FINANCE_DATA_JSON was not supplied.
+
 ## 0.3.0
 
 - Replaced the one-shot AI analysis screen with the persistent **PenguCost AI Agent**: per-user conversations, follow-up chat, history and editable Brain memory.

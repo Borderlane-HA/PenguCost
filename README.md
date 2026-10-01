@@ -228,7 +228,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.3.0
+./scripts/build-offline-bundle.sh 0.3.1
 ```
 
 This creates:
@@ -256,7 +256,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update latest
 Or update to a specific release tag:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.3.0
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.3.1
 ```
 
 The persistent `/data` Docker volume is not replaced by an update.
