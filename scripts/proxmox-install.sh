@@ -53,11 +53,11 @@ banner() {
   clear 2>/dev/null || true
   printf '%b' "$C_CYAN"
   cat <<'ART'
-   ____                        ______          __
-  / __ \___  ____  ____ ___  / ____/___  ____/ /_
- / /_/ / _ \/ __ \/ __ `__ \/ /   / __ \/ __  / /
-/ ____/  __/ / / / / / / / / /___/ /_/ / /_/ / /
-/_/    \___/_/ /_/_/ /_/ /_/\____/\____/\__,_/_/
+ ____  _____ _   _  ____ _   _  ____ ___  ____ _____
+|  _ \| ____| \ | |/ ___| | | |/ ___/ _ \/ ___|_   _|
+| |_) |  _| |  \| | |  _| | | | |  | | | \___ \ | |
+|  __/| |___| |\  | |_| | |_| | |__| |_| |___) || |
+|_|   |_____|_| \_|\____|\___/ \____\___/|____/ |_|
 ART
   printf '%b\n' "$C_RESET"
   printf '%bGuided Proxmox VE installer%b\n\n' "$C_BOLD" "$C_RESET"
@@ -180,7 +180,7 @@ advanced_setup() {
     2) INSTALL_CHANNEL="stable" ;;
     3)
       INSTALL_CHANNEL="tag"
-      EXACT_TAG="$(prompt 'Tag (example v0.1.4)' "$EXACT_TAG")"
+      EXACT_TAG="$(prompt 'Tag (example v0.1.5)' "$EXACT_TAG")"
       ;;
     *) fail "Invalid source selection."; exit 1 ;;
   esac
@@ -329,11 +329,27 @@ pct exec "$VMID" -- bash -lc '
   set -Eeuo pipefail
   export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl docker.io tar
-  if ! apt-get install -y --no-install-recommends docker-compose; then
-    apt-get install -y --no-install-recommends docker-compose-v2
+  # Debian 13 splits the Docker CLI into a recommended docker-cli package.
+  # Keep package recommendations enabled here so Debian 12 and 13 both get
+  # a complete Docker installation.
+  apt-get install -y ca-certificates curl docker.io tar
+  if ! command -v docker >/dev/null 2>&1; then
+    apt-get install -y docker-cli
+  fi
+  if ! apt-get install -y docker-compose; then
+    apt-get install -y docker-compose-v2
   fi
   systemctl enable --now docker
+  command -v docker >/dev/null 2>&1
+  docker --version
+  if docker compose version >/dev/null 2>&1; then
+    docker compose version
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose --version
+  else
+    echo "Docker Compose is not available after installation." >&2
+    exit 1
+  fi
 '
 ok "Docker is ready."
 

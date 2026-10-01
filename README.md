@@ -208,7 +208,7 @@ If installation fails after the LXC has been created, the installer offers to re
 The release workflow can still create a self-contained PenguCost Docker image bundle for manual/offline Docker deployment:
 
 ```bash
-./scripts/build-offline-bundle.sh 0.1.4
+./scripts/build-offline-bundle.sh 0.1.5
 ```
 
 This creates:
@@ -336,6 +336,12 @@ PenguCost ships with a source-available personal/non-commercial license in `LICE
 - Configurable category colors used throughout the overview.
 - Reminder bell for cancellation deadlines and automatic renewals.
 - Configurable reminder lead time in Settings.
+
+
+### Added in 0.1.5
+- Clear, unambiguous `PENGUCOST` banner in the guided Proxmox installer.
+- Fixed Debian 13 Docker installation where `docker.io` could be installed without the separate Docker CLI when recommendations were disabled.
+- Installer now verifies both the Docker CLI and Docker Compose before copying/building PenguCost.
 
 ### Added in 0.1.4
 - Guided Proxmox VE installer with Quick and Advanced setup modes

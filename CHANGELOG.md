@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+### Fixed
+- Replaced the ambiguous ASCII art with a clearly readable `PENGUCOST` installer banner.
+- Fixed Proxmox VE 9 / Debian 13 installs where `docker.io` was installed with `--no-install-recommends`, leaving the separately packaged Docker CLI unavailable and causing `docker: command not found` during the image build.
+- Docker installation now keeps package recommendations enabled for cross-version Debian compatibility and explicitly verifies the Docker CLI before continuing.
+- Added a Docker Compose availability check before the PenguCost source is copied/built.
+
 ## 0.1.4
 
 ### Changed

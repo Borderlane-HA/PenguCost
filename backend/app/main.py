@@ -16,7 +16,7 @@ from .models import User, Expense, ExpensePrice, Account, Category, Setting, Rem
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs
 
-app = FastAPI(title='PenguCost', version='0.1.4')
+app = FastAPI(title='PenguCost', version='0.1.5')
 Base.metadata.create_all(engine)
 
 def migrate_schema():
@@ -155,7 +155,7 @@ def startup():
     db.close()
 
 @app.get('/api/health')
-def health(): return {'status':'ok','service':'PenguCost','version':'0.1.4'}
+def health(): return {'status':'ok','service':'PenguCost','version':'0.1.5'}
 
 @app.get('/api/auth/status')
 def auth_status(db: Session=Depends(get_db)):
