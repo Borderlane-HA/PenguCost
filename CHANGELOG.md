@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4
+
+- Open the bank statement assistant directly from Income & Expenses beside New entry.
+- Explicitly choose a new entry or an existing owned entry during reviewed import. Existing updates preserve prefilled contract fields and use dated price history in the same transaction as the duplicate-import guard.
+- Show one-time bookings in a separate result filter and prefill one-time entries with their booking date.
+- Retain bounded review fields, source/page, original excerpts and reasons for rejected bookings in encrypted results. Correct and revalidate against the retained text excerpt, or explicitly review image transcriptions against the original. Recalculate suggestions after a valid correction.
+- Add a local CSV preview and mapped import without an AI profile: UTF-8/Windows-1252, delimiter/header selection, signed amounts or separate debit/credit, explicit direction/date formats and optional currency/reference. Imports remain review-only until each finance entry is saved.
+- Separate matching suggestions for known differing contract references/accounts, and show these identifiers in the existing-entry selector.
+
 ## 0.5.3
 
 - Normalize unambiguous German booking dates, decimal/grouped amounts, explicit debit/credit aliases, EUR symbols, optional null fields and floating-point serialization noise before validation.

@@ -1,13 +1,13 @@
-# Bank statement assistant — 0.5.3
+# Bank statement assistant — 0.5.4
 
 ## Workflow
 
-1. Open **AI Agent → Bank statements**.
+1. Open **Income & Expenses → Analyze bank statement**, or **AI Agent → Bank statements**.
 2. Upload PDF, JPG/JPEG or PNG files covering several months of one account.
 3. Select the AI profile and optionally the account to assign to new entries.
 4. Confirm sending statement contents to this profile, then start analysis.
 5. Review the results: counterparty, count, dates, amounts, cadence and evidence.
-6. Import one result or select several for sequential review in the ordinary editor.
+6. Filter recurring or one-time bookings. Import one result or select several for sequential review in the ordinary editor. Choose a new entry or explicitly select an existing entry to update.
 7. Confirm amount, currency, direction and interval, then save each entry.
 
 The counter advances when a page/request has finished extraction; it is not a
@@ -23,8 +23,8 @@ but cannot retract a request already received by the selected AI provider.
 not four simultaneous subscriptions or four times the proposed recurring amount.
 Separate policy/contract references, accounts, currencies and income/expense
 directions produce separate candidates. **HUK24 8×** can therefore be multiple
-policies when policy references differ. A candidate requires two occurrences.
-Single occurrences are counted in the summary but are not recurring suggestions.
+policies when policy references differ. A recurring candidate requires two occurrences.
+Single occurrences appear separately under **One-time** and can be saved as one-time entries with their booking date.
 
 Monthly, quarterly, half-yearly and yearly intervals are determined from observed
 date gaps. Month-end/leap-year shifts are allowed. Missing months, weekly payments,
@@ -33,7 +33,7 @@ Even a regular pattern does not prove a subscription or ongoing contract.
 
 The latest observed amount is proposed. Different historical amounts are shown
 but do not create historical price periods automatically. New entries start today
-by default to avoid applying the latest price retrospectively. You can change the
+for recurring suggestions by default to avoid applying the latest price retrospectively. You can change the
 start/date/interval in the editor. Contract end and notice periods stay empty.
 Non-EUR transactions retain their original currency in results; manually convert
 the amount to EUR and change the draft currency before import. There is no FX API.
@@ -75,8 +75,10 @@ the amount to EUR and change the draft currency before import. There is no FX AP
   A booking date with an omitted year needs supporting statement-year context.
   Relative page 1 is mapped only when the request contains exactly one page.
 - Rejected rows have fixed, localized reason counts: fields, source page, missing
-  source evidence, or date/amount/merchant not confirmed by the excerpt. Raw
-  rejected rows and provider replies are not persisted. If all model rows were
+  source evidence, or date/amount/merchant not confirmed by the excerpt. Encrypted
+  results now retain sanitized editable fields, source/page, reason and a bounded
+  booking excerpt, at most 2,000 rejected bookings. Whole pages/images and raw
+  provider replies are not retained. Invalid date/amount values become empty fields. If all model rows were
   rejected, the UI says they failed validation rather than claiming the PDF had
   no readable transactions. Invalid/truncated JSON still fails the job.
 - Exact duplicate uploads are skipped. Overlapping transactions are deduplicated
@@ -88,6 +90,61 @@ Models can miss rows, split the same merchant under different names or read a
 scan incorrectly. Counts are extracted evidence, not a guarantee of completeness.
 Useful input includes full booking dates/year, counterparty, amount, debit/credit
 columns and account identifiers. Clear, complete statements work best.
+
+## Assigning an existing entry
+
+Choose **Update an existing entry** in the review dialog, then select an owned
+entry with the same direction and currency. Suggestions respect differing known
+contract references and selected accounts; all compatible entries remain available
+for deliberate assignment. Names, account and contract references help distinguish
+policies. The editor retains the existing contract, category, account and notes,
+proposing only the observed amount/variable flag. Check every field before saving.
+A changed price requires an effective date (today initially). Updates use the
+existing dated price-history logic and commit atomically with the import guard.
+The assistant does not copy all observed prices into history automatically.
+
+## Reviewing rejected bookings
+
+Expand **Review rejected bookings** to see source/page (CSV row), reason and a
+bounded original text excerpt. When invalid line references can be recovered,
+recovery retains a likely excerpt supported by at least two proposed booking
+fields. The row remains rejected until explicit review; recovery is not acceptance.
+Correct date, merchant, amount, currency/direction and optional stable reference,
+confirm comparison with the original, then revalidate. Date, amount and merchant
+must still be supported by the retained text. Suggestions/counts are recomputed;
+this action never creates a finance entry. Image excerpts are model transcriptions,
+not independently verified text: compare them with the original image and confirm.
+Unavailable source/page/excerpts cannot be bypassed; upload the original again or
+create an entry manually. Corrected bookings stay marked as manually reviewed in
+encrypted result data. Existing imported candidate IDs retain their import guard
+when recalculation adds an occurrence to the same group.
+
+Analyses created before 0.5.4 have no retained rejected fields or singleton lists.
+Upload them again to use these additions. Existing recurring candidates can still
+be assigned to entries without rerunning the analysis.
+
+## Local CSV workflow
+
+Select **CSV import**, choose one CSV and load its preview. No AI profile,
+provider request or external processing is used. Map date, counterparty and a
+signed amount, or both debit and credit columns. Optional mappings are currency,
+direction and stable contract reference. Currency defaults to EUR. Direction
+aliases are explicit (expense/income, debit/credit, Lastschrift/Gutschrift).
+Without a direction column, signed amounts use negative=expense/positive=income;
+choose all-expense/all-income explicitly for an unsigned export. Separate debit
+and credit require exactly one nonzero side. Check this against the preview.
+
+Supported encodings: UTF-8 with/without BOM and Windows-1252. Delimiters: semicolon,
+comma, tab and pipe, with quoted fields supported. Automatic header detection
+checks the first 30 records; delimiter/encoding/header can be selected manually.
+Dates default to ISO/German full dates, with an explicit US month/day/year option.
+Up to 20 MB, 64 columns and 2,000 bookings. Malformed bookings become rejected
+review items; invalid mappings or oversized files are rejected before job creation.
+CSV creates encrypted analysis results only, then uses the normal reviewed import
+workflow, one-time list and existing-entry assignment. Duplicate imports within
+an analysis are blocked; a repeated CSV upload is a new analysis, so review existing
+matches before creating entries. CSV row numbers refer to parsed CSV records,
+which can span several physical lines when fields contain quoted line breaks.
 
 ## Privacy and persistence
 
@@ -119,7 +176,10 @@ sessions are invalidated after a full administrator JSON restore.
 | GET | `/api/ai/statements` | Current user's latest 50 analysis jobs |
 | GET | `/api/ai/statements/{job_id}` | Status/progress, decrypted results, existing-entry matches and imported flags |
 | DELETE | `/api/ai/statements/{job_id}` | Cancel/delete analysis; keep imported entries |
-| POST | `/api/ai/statements/{job_id}/candidates/{candidate_id}/import` | Reviewed `ExpenseIn` payload; atomic creation with a unique import guard |
+| POST | `/api/ai/statements/csv/preview` | CSV file, optional delimiter/encoding/header; column mapping and five preview records |
+| POST | `/api/ai/statements/csv/import` | CSV file, JSON mapping and direction/date settings; encrypted ready result, 201 |
+| POST | `/api/ai/statements/{job_id}/rejected/{row_id}/review` | Corrected booking fields and `reviewed=true`; evidence revalidation and recomputed results |
+| POST | `/api/ai/statements/{job_id}/candidates/{candidate_id}/import` | Reviewed `ExpenseIn` plus optional `target_expense_id`; atomic creation/update with unique import guard |
 
 ## Upgrade
 

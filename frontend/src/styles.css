@@ -207,3 +207,23 @@ html[data-theme="emerald"]{--bg:#f1f7f5;--panel:#fff;--panel-2:#eef7f3;--text:#1
 html[data-theme="graphite"]{--button-text:#111;--positive:#8fcba9}
 @media(max-width:1100px){.statement-layout{grid-template-columns:1fr}.statement-history{max-height:230px;overflow-y:auto}}
 @media(max-width:650px){.statement-upload,.statement-results,.statement-history{padding:16px}.statement-drop{flex-direction:column}.statement-candidate-values{grid-template-columns:1fr}.statement-candidate-footer{flex-direction:column}.statement-candidate-footer details{width:100%}.statement-upload-actions{flex-direction:column;align-items:stretch}.statement-candidate-head{flex-wrap:wrap}}
+
+/* Statement review and local CSV import */
+.section-head-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.statement-tabs{margin-bottom:18px;flex-wrap:wrap;width:fit-content;max-width:100%}
+.statement-csv fieldset,.entry-form fieldset{border:0;padding:0;margin:0;min-width:0}
+.statement-csv .form-grid{padding:18px 0}
+.statement-csv-help{margin:18px 0!important;color:var(--muted);line-height:1.6}
+.statement-csv-preview{overflow:auto;max-width:100%;border:1px solid var(--line);border-radius:10px;max-height:300px}
+.statement-csv-preview table{width:max-content;min-width:100%;font-size:12px}
+.statement-csv-preview th,.statement-csv-preview td{max-width:260px;white-space:normal;overflow-wrap:anywhere;padding:10px}
+.statement-rejected{margin:18px 0;padding:14px;border:1px solid var(--line);border-radius:12px}
+.statement-rejected>summary{cursor:pointer;font-weight:700}
+.statement-rejected-list{display:grid;gap:12px;margin:16px 0}
+.statement-rejected-list article{padding:14px;background:var(--panel-2);border-radius:10px;min-width:0}
+.statement-rejected-list small,.statement-original small{display:block;color:var(--muted);margin:6px 0;overflow-wrap:anywhere}
+.statement-rejected-list article p,.statement-original p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;margin:10px 0}
+.statement-rejected-list article button{margin-top:10px}
+.statement-import-choice{display:grid;gap:12px;margin:16px 0}
+.statement-original{padding:14px;border:1px solid var(--line);border-radius:10px}
+@media(max-width:650px){.section-head-actions{width:100%}.section-head-actions>button{flex:1}.statement-tabs button{white-space:normal}.statement-csv .form-grid{grid-template-columns:1fr}.statement-csv .span2{grid-column:auto}}

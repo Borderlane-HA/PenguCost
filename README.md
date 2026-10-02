@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.5.3
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.5.4
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards. It also cleans stale Docker build cache before the build and checks that enough free disk space is available. If an older small LXC runs out of space, enlarge it on the Proxmox host, for example with `pct resize <VMID> rootfs +8G`. The update helper is source-controlled and refreshes itself after successful updates.
@@ -205,9 +205,9 @@ See also:
 See [`LICENSE`](LICENSE).
 
 
-## Bank statement assistant (0.5.0)
+## Bank statement assistant (0.5.4)
 
-Open **AI Agent → Bank statements / Kontoauszüge**. Upload multiple statements
+Open **Income & Expenses → Analyze bank statement**, or **AI Agent → Bank statements / Kontoauszüge**. Upload multiple statements
 from the same account (ideally 3–12 months), select an enabled AI profile and the
 account for new entries, then confirm processing by that profile.
 
@@ -222,7 +222,7 @@ Choose **Review & import** for one suggestion, or select several and review them
 one by one. The ordinary entry editor is prefilled; correct the amount, income
 or expense direction, currency, billing interval, category, account and dates.
 Confirm the review before saving. Nothing is created just by uploading. Possible
-existing entries are shown; importing the same candidate twice is blocked.
+existing entries are shown. Explicitly choose **Create a new entry** or **Update an existing entry**. For updates, existing contract fields stay prefilled and a changed amount requires an effective date; price history is retained. Importing the same candidate twice is blocked.
 
 Limits: **10 files, 20 MB total, 40 pages** per analysis, one running analysis
 per user and two globally. Text PDFs use local text extraction and can be analyzed
@@ -238,7 +238,11 @@ distinct error messages. Ollama statements use the native `/api/chat` endpoint, 
 disabled and an explicit context window (default 32,768 tokens, configurable in
 Settings). German date/amount formats and numbered PDF source lines are supported. Rejected
 rows are grouped by reason so empty results can be diagnosed. See the
-[0.5.3 update notes](UPDATE-0.5.3.md).
+[0.5.4 update notes](UPDATE-0.5.4.md).
+
+The **One-time** filter lists single bookings and proposes their booking date for one-time entries. **Review rejected bookings** exposes bounded excerpts, source/page and reasons; corrections are checked again against the original text before they enter suggestions. Image transcriptions require comparison with the original. Older analyses lack these details and need a new upload.
+
+**CSV import** works locally without AI. Preview a bank CSV, map date/counterparty/amount (or separate debit/credit), check date format, direction and currency, then read the bookings. UTF-8 and Windows-1252, semicolon/comma/tab/pipe delimiters and header rows after export preambles are supported. Unmapped currency defaults to EUR; unsigned amounts need an explicit direction choice. Limit: 20 MB and 2,000 bookings. Preview/import does not create finance entries; the same review and assignment workflow follows.
 
 Raw uploads are temporary and never written into the PenguCost data volume.
 Results are encrypted with the installation's existing Fernet key and isolated
@@ -250,7 +254,7 @@ uploaded again. User/admin JSON exports intentionally omit statement results;
 volume backups include the encrypted results and matching encryption key.
 
 The proposed amount is the **latest observed amount**, never the sum of all
-occurrences. A new draft starts today so a later observed price is not applied
+occurrences. A new recurring draft starts today so a later observed price is not applied
 retrospectively to the whole observed period. Statement dates do not establish
 contract dates or cancellation terms. The dashboard has no foreign-exchange
 conversion; manually convert non-EUR proposals to EUR and change their draft currency

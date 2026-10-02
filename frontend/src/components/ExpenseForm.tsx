@@ -11,7 +11,7 @@ const blank={name:'',provider:'',provider_website:'',entry_type:'expense',amount
 
 export default function ExpenseForm({expense,accounts,categories,onSave,onCancel,isClone=false,onCategoryAdded,existingExpenses=[],initialValues}:{expense?:Expense;accounts:Account[];categories:Category[];onSave:(x:any)=>Promise<void>;onCancel:()=>void;isClone?:boolean;onCategoryAdded?:()=>Promise<void>|void;existingExpenses?:Expense[];initialValues?:Partial<Expense>}){
  const{t}=useI18n();
- const initial=expense?{...expense,price_effective_from:null}:{...blank,...initialValues};
+ const initial=expense?{...expense,...initialValues,price_effective_from:null}:{...blank,...initialValues};
  const derivedInitialCancellation=cancellationFrom(initial.contract_end,initial.cancellation_notice_days);
  const initialAutoCancellation=!!initial.contract_end&&initial.cancellation_notice_days!==null&&initial.cancellation_notice_days!==undefined&&(isClone||!initial.cancellation_date||initial.cancellation_date===derivedInitialCancellation);
  if(isClone&&initialAutoCancellation)initial.cancellation_date=derivedInitialCancellation;
