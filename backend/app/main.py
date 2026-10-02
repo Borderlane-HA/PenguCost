@@ -34,7 +34,7 @@ from .ai import AIResponseError, analyze_costs, chat_finances
 from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, StatementError,
     document_kind, document_pages, extract_transactions, build_candidates, normalized)
 
-APP_VERSION = '0.5.2'
+APP_VERSION = '0.5.3'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -1992,6 +1992,7 @@ def _statement_progress(job_id: str, user_id: int, pages: int = 0, total: int | 
 
 async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[str, bytes]], profile: dict, account_id: int | None):
     transactions, warnings, rejected, page_count = [], [], 0, 0
+    rejection_reasons = {}
     try:
         prepared = []
         seen = set()
@@ -2012,16 +2013,14 @@ async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[st
         for source, pages in prepared:
             _statement_progress(job_id, user_id)
             extracted, skipped = await extract_transactions(profile, pages, source,
-                lambda count: _statement_progress(job_id, user_id, pages=count))
+                lambda count: _statement_progress(job_id, user_id, pages=count), rejection_reasons)
             transactions.extend(extracted)
             rejected += skipped
             if len(transactions) > MAX_TRANSACTIONS:
                 raise StatementError('Too many transactions. Split the documents into smaller analyses.')
         result = build_candidates(transactions)
-        result.update({'warnings': warnings, 'rejected_transactions': rejected, 'account_id': account_id})
-        if rejected:
-            result['warnings'].append(f'{rejected} rows with invalid or unverifiable fields were excluded. Check your statements.')
-        if not transactions:
+        result.update({'warnings': warnings, 'rejected_transactions': rejected, 'rejection_reasons': rejection_reasons, 'account_id': account_id})
+        if not transactions and not rejected:
             result['warnings'].append('No readable transactions found. Check the statement format and model image capability.')
         with SessionLocal() as db:
             job = db.get(StatementJob, job_id)

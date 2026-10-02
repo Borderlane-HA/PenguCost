@@ -242,4 +242,80 @@ def test_ollama_statement_batches_each_page_and_passes_context(monkeypatch):
     assert progress==[1,1,1,1] and calls.await_count==4
     for n,call in enumerate(calls.await_args_list,1):
         assert call.kwargs['ollama_context_tokens']==65536 and call.kwargs['max_tokens']==0
-        assert f'PAGE {n}\n' in call.kwargs['messages'][0]['content']
+        assert f'use page={n} for these rows.' in call.kwargs['messages'][0]['content']
+
+
+def german_row(**updates):
+    row={'date':'16.01.2025','merchant':'Netflix','reference':None,'account_key':None,
+         'amount':'15,99','currency':'€','entry_type':'debit','page':1,
+         'evidence':'2025-01-16 Netflix 15.99'}
+    row.update(updates)
+    return row
+
+
+@pytest.mark.parametrize('amount', ['15,99','15,99 EUR','15,99-','-15,99',15.990000000000002])
+def test_german_formats_preserve_original_source_evidence(amount):
+    text='16.01.2025 Netflix 15,99 EUR Lastschrift'
+    rows,skipped=parse_transactions(json.dumps({'transactions':[german_row(amount=amount)]}),[{'page':1,'text':text}],'german.pdf')
+    assert skipped==0 and len(rows)==1
+    assert rows[0]['date']=='2025-01-16' and rows[0]['amount']==15.99
+    assert rows[0]['currency']=='EUR' and rows[0]['entry_type']=='expense'
+    assert rows[0]['evidence']==text and rows[0]['reference']==''
+
+
+@pytest.mark.parametrize('printed,amount', [('1.234,56','1.234,56'),('1,234.56','1,234.56'),('1 234,56','1 234,56')])
+def test_grouped_amounts_with_line_references(printed,amount):
+    text=f'16.01.2025\nNetflix\n{printed} EUR Lastschrift'
+    row=german_row(amount=amount,evidence='paraphrased model summary',evidence_lines=[1,2,3])
+    rows,skipped=parse_transactions(json.dumps({'transactions':[row]}),[{'page':1,'text':text}],'german.pdf')
+    assert skipped==0 and rows[0]['amount']==1234.56
+    assert rows[0]['evidence']==text
+
+
+def test_source_lines_recover_split_pdf_booking_and_relative_page_one():
+    text='Kontoauszug Januar 2025\n16.01.2025\nNETFLIX.COM\n15,99 EUR\nWeitere Informationen'
+    row=german_row(page=1,evidence=None,evidence_lines=['L2','L3','L4'])
+    rows,skipped=parse_transactions(json.dumps({'transactions':[row]}),[{'page':12,'text':text}],'german.pdf')
+    assert skipped==0 and rows[0]['page']==12
+    assert rows[0]['evidence']=='16.01.2025\nNETFLIX.COM\n15,99 EUR'
+
+
+def test_omitted_year_requires_source_statement_year():
+    row=german_row(date='2025-01-16',evidence_lines=[1,2,3])
+    pages=[{'page':1,'text':'16.01.\nNetflix\n15,99 EUR','year_context':'Kontoauszug Januar 2025'}]
+    rows,skipped=parse_transactions(json.dumps({'transactions':[row]}),pages,'german.pdf')
+    assert len(rows)==1 and skipped==0
+    pages[0]['year_context']=''
+    diagnostics={}
+    rows,skipped=parse_transactions(json.dumps({'transactions':[row]}),pages,'german.pdf',diagnostics)
+    assert rows==[] and skipped==1 and diagnostics=={'evidence_date':1}
+
+
+@pytest.mark.parametrize('change,reason', [
+    ({'date':'2025-02-16'},'evidence_date'),
+    ({'amount':'25,99'},'evidence_amount'),
+    ({'merchant':'Invented Merchant'},'evidence_merchant'),
+    ({'date':'tomorrow'},'schema_date'),
+    ({'amount':'unknown'},'schema_amount'),
+    ({'entry_type':'something'},'schema_entry_type'),
+    ({'currency':'xyz'},'schema_currency'),
+    ({'evidence_lines':[999]},'evidence_missing'),
+    ({'evidence_lines':[-1]},'evidence_missing'),
+    ({'evidence_lines':['L1','SECRET']},'evidence_missing'),
+    ({'page':2},'source_page'),
+])
+def test_rejection_reasons_without_storing_model_input(change,reason):
+    row=german_row(evidence_lines=[1,2,3]);row.update(change)
+    diagnostics={}
+    rows,skipped=parse_transactions(json.dumps({'transactions':[row]}),[{'page':1,'text':'16.01.2025\nNetflix\n15,99 EUR'}],'german.pdf',diagnostics)
+    assert rows==[] and skipped==1 and diagnostics=={reason:1}
+    assert 'SECRET' not in json.dumps(diagnostics)
+
+
+def test_referenced_bookings_require_both_fields_and_text_found_on_source():
+    row=german_row(evidence_lines=[])
+    pages=[{'page':1,'text':'16.01.2025 Netflix 15,99 EUR'}]
+    rows,skipped=parse_transactions(json.dumps({'transactions':[dict(row,evidence='invented quotation')]}),pages,'german.pdf')
+    assert rows==[] and skipped==1
+    rows,skipped=parse_transactions(json.dumps({'transactions':[dict(row,amount=100,evidence='16.01.2025 Netflix 15,99 EUR')]}),pages,'german.pdf')
+    assert rows==[] and skipped==1

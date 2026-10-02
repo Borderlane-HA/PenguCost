@@ -280,3 +280,15 @@ def test_statement_error_preserves_safe_diagnostic_message(client,monkeypatch):
     job=client.get(f'/api/ai/statements/{job_id}').json()
     assert job['status']=='error'
     assert 'reasoning but no final answer' in job['last_error']
+
+
+def test_rejected_model_rows_expose_safe_counts_not_false_no_bookings(client,monkeypatch):
+    rows=model_rows();rows['transactions'][0]['amount']='INVALID PRIVATE VALUE'
+    rows['transactions'][1]['date']='INVALID PRIVATE DATE'
+    monkeypatch.setattr(statements,'_call_model',AsyncMock(return_value=json.dumps(rows)))
+    job_id=upload(client,profile(client)).json()['id']
+    job=client.get(f'/api/ai/statements/{job_id}').json()
+    assert job['status']=='ready' and job['transaction_count']==2
+    assert job['rejected_transactions']==2
+    assert job['rejection_reasons']=={'schema_amount':1,'schema_date':1}
+    assert 'PRIVATE' not in json.dumps(job)

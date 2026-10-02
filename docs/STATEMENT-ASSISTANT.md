@@ -1,4 +1,4 @@
-# Bank statement assistant — 0.5.2
+# Bank statement assistant — 0.5.3
 
 ## Workflow
 
@@ -64,9 +64,21 @@ the amount to EUR and change the draft currency before import. There is no FX AP
   messages. Native truncation diagnostics include requested context and numeric
   prompt/output counts when supplied by Ollama; no response content is exposed.
   Response bodies and reasoning are not stored or displayed in errors.
-- Model output must be complete JSON. Dates, amounts, directions, currencies and
-  page references are validated. Text-PDF evidence must occur on its source page.
-  Invalid rows are excluded with a warning; invalid/truncated replies fail the job.
+- Model output must be complete JSON. Unambiguous German dates (`16.01.2025`),
+  grouped/comma-decimal amounts (`1.234,56`), explicit debit/credit aliases, EUR
+  symbols and optional null reference/account fields are normalized.
+- Text PDF input has local numbered lines. Models can cite `evidence_lines`
+  (up to eight source lines spanning eight lines). The application reconstructs
+  an actual source excerpt and checks the structured booking date, amount and
+  merchant against it. Normalized quote matching also handles punctuation,
+  whitespace and date-format differences; arbitrary paraphrases are rejected.
+  A booking date with an omitted year needs supporting statement-year context.
+  Relative page 1 is mapped only when the request contains exactly one page.
+- Rejected rows have fixed, localized reason counts: fields, source page, missing
+  source evidence, or date/amount/merchant not confirmed by the excerpt. Raw
+  rejected rows and provider replies are not persisted. If all model rows were
+  rejected, the UI says they failed validation rather than claiming the PDF had
+  no readable transactions. Invalid/truncated JSON still fails the job.
 - Exact duplicate uploads are skipped. Overlapping transactions are deduplicated
   by date, normalized party/reference/account, amount, currency and direction.
   Same-day identical payments on one page retain their multiplicity. Identical

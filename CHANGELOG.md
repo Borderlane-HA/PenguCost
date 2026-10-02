@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+- Normalize unambiguous German booking dates, decimal/grouped amounts, explicit debit/credit aliases, EUR symbols, optional null fields and floating-point serialization noise before validation.
+- Add line-numbered PDF input and evidence line references. Recover actual source excerpts instead of requiring the model to reproduce a multi-line booking as one contiguous formatted quote.
+- Verify normalized date, amount and merchant against the bounded source excerpt. Invented/unverifiable rows remain excluded.
+- Map relative page 1 to the real source page for single-page requests; page labels explicitly request the source page number.
+- Show per-reason rejection counts in German/English. Distinguish model-returned bookings that failed validation from a document containing no readable bookings.
+
 ## 0.5.2
 
 - Ollama bank statements now use native `/api/chat` requests with an explicit context setting (default 32,768 tokens), `num_predict: -1` in Automatic mode, JSON output and thinking disabled. Normal chat/provider paths remain unchanged.
