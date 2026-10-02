@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- Added Automatic / no fixed output limit for Ollama bank statement analysis; this is the default for new Ollama profiles. Manual limits remain available.
+- Once per installation, existing Ollama profiles using the old 8,000-token default switch to Automatic. Explicit custom values such as 24,000 are preserved; choose Automatic in Settings for those profiles.
+- Preserved Automatic through profile editing, exports and administrator restore.
+- Extended statement request read timeout to 30 minutes while retaining model/server context limits.
+- Replaced the generic response error with separate safe messages for empty answers, reasoning-only answers, missing choices, truncation and filtering.
+- Validated with backend regression tests and a frontend production build. No live Ollama model or private bank statement was available; these changes do not establish the cause of every provider failure.
+
 ## 0.5.0
 
 - Add a bank statement assistant for multiple PDF/JPG/PNG uploads with recurring debit and income detection, transaction counts, amounts, cadence, confidence and source evidence.

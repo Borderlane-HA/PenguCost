@@ -30,11 +30,11 @@ from .models import (
     HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange, StatementJob, StatementImport,
 )
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
-from .ai import analyze_costs, chat_finances
+from .ai import AIResponseError, analyze_costs, chat_finances
 from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, StatementError,
     document_kind, document_pages, extract_transactions, build_candidates, normalized)
 
-APP_VERSION = '0.5.0'
+APP_VERSION = '0.5.1'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -71,6 +71,13 @@ def migrate_schema():
     if 'statement_max_tokens' not in profile_columns:
         with engine.begin() as conn:
             conn.execute(text('ALTER TABLE ai_profiles ADD COLUMN statement_max_tokens INTEGER DEFAULT 8000'))
+    # One-time migration of the former Ollama default. Keep explicit custom
+    # limits and do not override a later deliberate choice of 8000 on restart.
+    with engine.begin() as conn:
+        marker = 'migration_051_ollama_automatic_output'
+        if not conn.execute(text('SELECT 1 FROM settings WHERE key = :key'), {'key': marker}).scalar():
+            conn.execute(text("UPDATE ai_profiles SET statement_max_tokens = 0 WHERE provider = 'ollama' AND statement_max_tokens = 8000"))
+            conn.execute(text('INSERT INTO settings (key, value) VALUES (:key, :value)'), {'key': marker, 'value': 'done'})
     user_columns = {c['name'] for c in inspect(engine).get_columns('users')}
     if 'session_version' not in user_columns:
         with engine.begin() as conn:
@@ -335,7 +342,7 @@ class AIProfileIn(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     api_key: str = ''
     enabled: bool = True
-    statement_max_tokens: int = Field(default=8000, ge=1000, le=32000)
+    statement_max_tokens: int = Field(default=8000, ge=0, le=32000)
 
 
 class AIProfilePatch(BaseModel):
@@ -345,7 +352,7 @@ class AIProfilePatch(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     enabled: Optional[bool] = None
-    statement_max_tokens: Optional[int] = Field(default=None, ge=1000, le=32000)
+    statement_max_tokens: Optional[int] = Field(default=None, ge=0, le=32000)
 
 
 class ReminderSettingsIn(BaseModel):
@@ -1627,7 +1634,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     for r in payload.get('reminder_actions') or []:
         db.add(ReminderAction(id=int(r['id']), expense_id=int(r['expense_id']), event_key=str(r.get('event_key') or ''), action=str(r.get('action') or 'done'), snooze_until=_date(r.get('snooze_until')), created_by=r.get('created_by'), created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
     for x in payload.get('ai_profiles') or []:
-        db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), statement_max_tokens=min(32000,max(1000,int(x.get('statement_max_tokens') or 8000))), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
+        db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), statement_max_tokens=0 if x.get('statement_max_tokens') == 0 else min(32000,max(1000,int(x.get('statement_max_tokens') or 8000))), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
     db.flush()
     for x in payload.get('ai_conversations') or []:
         conv = AIConversation(id=int(x['id']), user_id=int(x['user_id']), profile_id=x.get('profile_id'), title=str(x.get('title') or 'PenguCost AI')[:180], mode=str(x.get('mode') or 'analysis')[:24], target_savings=x.get('target_savings'), selected_expense_ids=json.dumps(x.get('selected_expense_ids') or []), status='idle', last_error='', created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at')))
@@ -1663,7 +1670,8 @@ def add_ai_profile(data: AIProfileIn, _: User = Depends(require_admin), db: Sess
     x = AIProfile(
         name=data.name.strip(), provider=data.provider,
         base_url=(data.base_url.strip() or defaults['default_base_url']), model=data.model.strip(),
-        api_key=encrypt_secret(data.api_key), enabled=data.enabled, statement_max_tokens=data.statement_max_tokens,
+        api_key=encrypt_secret(data.api_key), enabled=data.enabled,
+        statement_max_tokens=0 if data.provider == 'ollama' and 'statement_max_tokens' not in data.model_fields_set else data.statement_max_tokens,
     )
     db.add(x)
     db.commit()
@@ -2020,6 +2028,8 @@ async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[st
             error = f'AI provider rejected the request (HTTP {exc.response.status_code}). Check model image support, output limit and profile settings.'
         elif isinstance(exc, httpx.TimeoutException):
             error = 'AI provider timed out. Try fewer pages or a faster model.'
+        elif isinstance(exc, AIResponseError):
+            error = str(exc)
         elif isinstance(exc, RuntimeError):
             error = 'AI returned an empty or incomplete response. Try fewer pages or a model with sufficient output and image support.'
         else:

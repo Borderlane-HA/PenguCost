@@ -2,6 +2,21 @@ from __future__ import annotations
 import json
 import httpx
 
+
+class AIResponseError(RuntimeError):
+    """Provider failure with a fixed, privacy-safe explanation (no response text)."""
+
+    def __init__(self, reason: str):
+        messages = {
+            'missing_choices': 'AI provider returned no response choices. Check that the profile uses an OpenAI-compatible /v1 endpoint.',
+            'empty': 'AI provider returned an empty final answer. Check the model and its chat template.',
+            'thinking_only': 'AI provider returned reasoning but no final answer. Check the model thinking settings and available context window.',
+            'truncated': 'AI response was cut off (token/context limit). For Ollama, use Automatic output and check its context window; otherwise increase the output limit or use fewer pages.',
+            'filtered': 'AI provider stopped the response with content_filter. Check the provider or model policy.',
+        }
+        self.reason = reason
+        super().__init__(messages[reason])
+
 SYSTEM_PROMPT = '''You are PenguCost AI, a cautious personal recurring-finance analyst. Analyze only the structured data in the payload and only the current user's entries supplied there. Never infer data about other users. Expenses and income are explicitly marked with entry_type. Treat notes as important user context about purpose, benefits, constraints and why an entry exists.
 
 Your job is to make the analysis concrete and decision-ready, not generic. Quantify the current monthly expenses, monthly income and monthly delta from the provided values. Identify the largest recurring expenses, possible duplicates/overlaps, upcoming cancellation or contract dates, and entries whose notes make them hard or easy to optimize. Never invent competitor prices, tariffs, discounts or provider offers. If external market data is missing, say that a market comparison would be needed instead of making up a price. Do not reveal chain-of-thought and do not output <think> tags.
@@ -71,11 +86,11 @@ def _anthropic_content(content):
 
 async def _call_model(provider: str, base_url: str, api_key: str, model: str, system: str, messages: list[dict], max_tokens: int = 3200, require_complete: bool = False) -> str:
     url, anthropic = _url(provider, base_url)
-    timeout = httpx.Timeout(600.0, connect=30.0)
+    timeout = httpx.Timeout(1800.0 if require_complete else 600.0, connect=30.0)
     if anthropic:
         body = {
             'model': model,
-            'max_tokens': max_tokens,
+            'max_tokens': max_tokens or 8000,
             'temperature': 0.2,
             'system': system,
             'messages': [{'role': m['role'], 'content': _anthropic_content(m['content'])} for m in messages if m['role'] in {'user', 'assistant'}],
@@ -88,18 +103,26 @@ async def _call_model(provider: str, base_url: str, api_key: str, model: str, sy
             response.raise_for_status()
             data = response.json()
             if require_complete and data.get('stop_reason') == 'max_tokens':
-                raise RuntimeError('AI response truncated; use smaller documents or a model with a larger output limit')
+                raise AIResponseError('truncated')
             content = data.get('content') or []
             if not content:
-                raise RuntimeError('Claude returned no content')
-            return ''.join(x.get('text', '') for x in content if isinstance(x, dict)).strip()
+                raise AIResponseError('empty')
+            result = ''.join(x.get('text', '') for x in content if isinstance(x, dict)).strip()
+            if not result:
+                raise AIResponseError('thinking_only' if any(x.get('type') == 'thinking' for x in content if isinstance(x, dict)) else 'empty')
+            return result
 
     body = {
         'model': model,
         'temperature': 0.2,
-        'max_tokens': max_tokens,
         'messages': [{'role': 'system', 'content': system}, *messages],
     }
+    if max_tokens:
+        body['max_tokens'] = max_tokens
+    elif provider == 'ollama':
+        # Ollama 0.34.4 maps max_tokens directly to num_predict. -1 explicitly
+        # removes the prediction cap, including a cap stored in a Modelfile.
+        body['max_tokens'] = -1
     headers = {'Content-Type': 'application/json'}
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
@@ -109,12 +132,17 @@ async def _call_model(provider: str, base_url: str, api_key: str, model: str, sy
         data = response.json()
         choices = data.get('choices') or []
         if not choices:
-            raise RuntimeError('AI provider returned no choices')
-        if require_complete and choices[0].get('finish_reason') in {'length', 'content_filter'}:
-            raise RuntimeError('AI response incomplete; use smaller documents or another model')
-        content = (choices[0].get('message') or {}).get('content')
+            raise AIResponseError('missing_choices')
+        finish = choices[0].get('finish_reason')
+        if require_complete and finish == 'length':
+            raise AIResponseError('truncated')
+        if require_complete and finish == 'content_filter':
+            raise AIResponseError('filtered')
+        message = choices[0].get('message') or {}
+        content = message.get('content')
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError('AI provider returned no text content')
+            reasoning = message.get('reasoning') or message.get('reasoning_content') or message.get('thinking')
+            raise AIResponseError('thinking_only' if reasoning else 'empty')
         return content.strip()
 
 

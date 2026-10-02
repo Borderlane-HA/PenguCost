@@ -129,3 +129,40 @@ def test_incomplete_or_empty_provider_output_is_not_silently_accepted(monkeypatc
     monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(handler),trust_env=False,**kwargs))
     with pytest.raises(RuntimeError):
         asyncio.run(ai._call_model('custom','https://model.test/v1','','model','system',[{'role':'user','content':'test'}],require_complete=True))
+
+
+@pytest.mark.parametrize('provider,limit,expected', [('ollama',0,-1),('ollama',24000,24000),('custom',0,None),('custom',8000,8000),('claude',0,8000)])
+def test_automatic_and_manual_output_requests(monkeypatch,provider,limit,expected):
+    import asyncio
+    import httpx
+    from app import ai
+    original = httpx.AsyncClient
+    def handler(request):
+        body = json.loads(request.content)
+        assert body.get('max_tokens') == expected
+        if expected is None:
+            assert 'max_tokens' not in body
+        if provider == 'claude':
+            return httpx.Response(200,json={'stop_reason':'end_turn','content':[{'type':'text','text':'{"transactions":[]}'}]})
+        return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'{"transactions":[]}'}}]})
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs: original(transport=httpx.MockTransport(handler),trust_env=False,**kwargs))
+    assert asyncio.run(ai._call_model(provider,'https://model.test/v1','','model','system',[{'role':'user','content':'test'}],max_tokens=limit,require_complete=True)) == '{"transactions":[]}'
+
+
+@pytest.mark.parametrize('data,reason', [
+    ({'choices':[]},'missing_choices'),
+    ({'choices':[{'finish_reason':'stop','message':{'content':''}}]},'empty'),
+    ({'choices':[{'finish_reason':'stop','message':{'content':'','reasoning':'PRIVATE BANK DATA'}}]},'thinking_only'),
+    ({'choices':[{'finish_reason':'length','message':{'content':'PRIVATE BANK DATA'}}]},'truncated'),
+    ({'choices':[{'finish_reason':'content_filter','message':{'content':''}}]},'filtered'),
+])
+def test_precise_response_errors_exclude_provider_content(monkeypatch,data,reason):
+    import asyncio
+    import httpx
+    from app import ai
+    original = httpx.AsyncClient
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs: original(transport=httpx.MockTransport(lambda request:httpx.Response(200,json=data)),trust_env=False,**kwargs))
+    with pytest.raises(ai.AIResponseError) as exc:
+        asyncio.run(ai._call_model('ollama','https://model.test/v1','','model','system',[{'role':'user','content':'test'}],max_tokens=0,require_complete=True))
+    assert exc.value.reason == reason
+    assert 'PRIVATE BANK DATA' not in str(exc.value)

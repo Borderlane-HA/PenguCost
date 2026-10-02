@@ -213,5 +213,51 @@ def test_upgrade_adds_profile_limit_without_losing_existing_data(client):
     engine.dispose()
     main.migrate_schema()
     with SessionLocal() as db:
-        assert db.get(AIProfile,p).statement_max_tokens==8000
+        assert db.get(AIProfile,p).statement_max_tokens==0
         assert db.get(Expense,expense['id']).name=='Existing contract'
+
+
+def test_ollama_automatic_output_roundtrips_through_export_restore(client,monkeypatch):
+    p=profile(client)
+    assert client.get('/api/settings/ai/profiles').json()[0]['statement_max_tokens']==0
+    model=AsyncMock(return_value=json.dumps(model_rows()))
+    monkeypatch.setattr(statements,'_call_model',model)
+    assert upload(client,p).status_code==202
+    assert model.call_args.kwargs['max_tokens']==0
+    exported=client.get('/api/export/admin').json()
+    assert exported['ai_profiles'][0]['statement_max_tokens']==0
+    response=client.post('/api/import/admin',json=exported)
+    assert response.status_code==200
+    # Restore invalidates browser sessions; verify stored data directly.
+    from app.models import AIProfile
+    with SessionLocal() as db:
+        assert db.get(AIProfile,p).statement_max_tokens==0
+
+
+def test_ollama_default_migration_is_once_only_and_preserves_custom_limits(client):
+    from sqlalchemy import text
+    from app.models import AIProfile
+    old=profile(client);custom=profile(client)
+    assert client.put(f'/api/settings/ai/profiles/{old}',json={'statement_max_tokens':8000}).status_code==200
+    assert client.put(f'/api/settings/ai/profiles/{custom}',json={'statement_max_tokens':24000}).status_code==200
+    other=client.post('/api/settings/ai/profiles',json={'name':'Other','provider':'custom','base_url':'https://example.test/v1','model':'test'}).json()['id']
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM settings WHERE key='migration_051_ollama_automatic_output'"))
+    main.migrate_schema()
+    with SessionLocal() as db:
+        assert db.get(AIProfile,old).statement_max_tokens==0
+        assert db.get(AIProfile,custom).statement_max_tokens==24000
+        assert db.get(AIProfile,other).statement_max_tokens==8000
+    assert client.put(f'/api/settings/ai/profiles/{old}',json={'statement_max_tokens':8000}).status_code==200
+    main.migrate_schema()
+    with SessionLocal() as db:
+        assert db.get(AIProfile,old).statement_max_tokens==8000
+
+
+def test_statement_error_preserves_safe_diagnostic_message(client,monkeypatch):
+    from app.ai import AIResponseError
+    monkeypatch.setattr(statements,'_call_model',AsyncMock(side_effect=AIResponseError('thinking_only')))
+    job_id=upload(client,profile(client)).json()['id']
+    job=client.get(f'/api/ai/statements/{job_id}').json()
+    assert job['status']=='error'
+    assert 'reasoning but no final answer' in job['last_error']

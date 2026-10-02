@@ -175,7 +175,7 @@ def parse_transactions(reply: str, pages: list[dict], source: str) -> tuple[list
 async def extract_transactions(profile: dict, pages: list[dict], source: str, progress) -> tuple[list[dict], int]:
     transactions, skipped = [], 0
     profile = dict(profile)
-    max_tokens = profile.pop('statement_max_tokens', 8000)
+    max_tokens = profile.pop('statement_max_tokens', 0 if profile.get('provider') == 'ollama' else 8000)
     # A short statement period header aids year inference across page boundaries.
     header = pages[0].get('text', '')[:1200]
     for start in range(0, len(pages), 2):

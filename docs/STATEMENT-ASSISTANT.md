@@ -1,4 +1,4 @@
-# Bank statement assistant — 0.5.0
+# Bank statement assistant — 0.5.1
 
 ## Workflow
 
@@ -43,8 +43,20 @@ the amount to EUR and change the draft currency before import. There is no FX AP
 - PDFium locally extracts text from text PDFs. Sparse/scanned pages and photos
   are re-encoded as JPEG at up to 2,200 pixels per edge; images are capped at
   25 megapixels. Password-protected PDFs must be unlocked first.
-- AI calls process up to two pages and use the profile’s configurable output limit (default 8,000 tokens; configure in Settings → AI profiles).
+- AI calls process up to two pages. Ollama defaults to **Automatic / no fixed
+  output limit**, stored as `statement_max_tokens: 0`. PenguCost sends
+  `max_tokens: -1` to Ollama's OpenAI-compatible endpoint, which Ollama 0.34.4
+  maps directly to `num_predict: -1`. Manual limits remain available in Settings.
+  Other providers retain their 8,000-token default. Automatic does not enlarge
+  the model context window or override server/runtime limitations.
   Text PDFs can use a text model; scan/photo analysis needs image support.
+- Statement requests allow up to 30 minutes of read inactivity per call (connection
+  timeout: 30 seconds). An Ollama model still needs enough context for the input,
+  reasoning and final JSON together. The OpenAI-compatible request does not set
+  `num_ctx`; configure that on the Ollama server or in the model's Modelfile.
+- Empty final answers, reasoning without a final answer, missing response choices,
+  token/context truncation and provider filtering have separate privacy-safe error
+  messages. Response bodies and reasoning are not stored or displayed in errors.
 - Model output must be complete JSON. Dates, amounts, directions, currencies and
   page references are validated. Text-PDF evidence must occur on its source page.
   Invalid rows are excluded with a warning; invalid/truncated replies fail the job.
