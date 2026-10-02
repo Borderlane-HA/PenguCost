@@ -32,9 +32,10 @@ from .models import (
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import AIResponseError, analyze_costs, chat_finances
 from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, StatementError,
-    document_kind, document_pages, extract_transactions, build_candidates, normalized)
+    document_kind, document_pages, extract_transactions, build_candidates, normalized,
+    csv_table, csv_transactions, correct_booking)
 
-APP_VERSION = '0.5.3'
+APP_VERSION = '0.5.4'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -960,6 +961,15 @@ def add_expense(data: ExpenseIn, background_tasks: BackgroundTasks, user: User =
 @app.put('/api/expenses/{item_id}')
 def update_expense(item_id: int, data: ExpenseIn, background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = owned_expense(db, user, item_id)
+    _apply_expense_update(db, user, x, data)
+    db.commit()
+    db.refresh(x)
+    _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
+    return expense_dict(x)
+
+
+def _apply_expense_update(db: Session, user: User, x: Expense, data: ExpenseIn):
+    """Apply reviewed fields and price history inside the caller's transaction."""
     validate_catalog_access(db, user, data.category_id, data.account_id)
     old_contract_end = x.contract_end
     old_cancellation_date = x.cancellation_date
@@ -981,10 +991,6 @@ def update_expense(item_id: int, data: ExpenseIn, background_tasks: BackgroundTa
     changes = {k: {'from': before.get(k), 'to': after_preview.get(k)} for k in after_preview if k in before and before.get(k) != after_preview.get(k)}
     if changes:
         db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='updated', changes_json=json.dumps(changes, default=str, ensure_ascii=False)))
-    db.commit()
-    db.refresh(x)
-    _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
-    return expense_dict(x)
 
 
 @app.delete('/api/expenses/{item_id}')
@@ -1936,6 +1942,7 @@ async def ai_analyze(data: AIAnalyzeIn, user: User = Depends(current_user), db: 
 
 
 _STATEMENT_ADMISSION_LOCK = threading.Lock()
+_STATEMENT_REVIEW_LOCK = threading.Lock()
 
 
 @app.middleware('http')
@@ -1968,12 +1975,19 @@ def _statement_dict(job: StatementJob, db: Session, details: bool = False):
               'last_error': job.last_error, 'created_at': job.created_at}
     if details and job.result_encrypted:
         result.update(_statement_result(job))
+        result.pop('transactions', None)
+        for row in result.get('rejected_rows', []):
+            row.pop('account_key', None)
+            row.pop('year_context', None)
         imported = {i.candidate_id: i.expense_id for i in db.scalars(select(StatementImport).where(StatementImport.job_id == job.id))}
         existing = list(db.scalars(select(Expense).where(Expense.created_by == job.user_id)))
-        for candidate in result.get('candidates', []):
+        for candidate in result.get('candidates', []) + result.get('single_candidates', []):
             candidate['imported_expense_id'] = imported.get(candidate['id'])
             candidate['existing_matches'] = [{'id': x.id, 'name': x.name} for x in existing
                 if (x.entry_type or 'expense') == candidate['entry_type'] and x.currency == candidate['currency']
+                and (not candidate.get('contract_reference') or not x.contract_reference
+                     or normalized(x.contract_reference) == normalized(candidate['contract_reference']))
+                and (not result.get('account_id') or not x.account_id or x.account_id == result['account_id'])
                 and (normalized(x.name) == normalized(candidate['name'])
                      or (x.provider and normalized(x.provider) == normalized(candidate['provider']))) ]
     return result
@@ -1993,6 +2007,7 @@ def _statement_progress(job_id: str, user_id: int, pages: int = 0, total: int | 
 async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[str, bytes]], profile: dict, account_id: int | None):
     transactions, warnings, rejected, page_count = [], [], 0, 0
     rejection_reasons = {}
+    rejected_rows = []
     try:
         prepared = []
         seen = set()
@@ -2013,13 +2028,16 @@ async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[st
         for source, pages in prepared:
             _statement_progress(job_id, user_id)
             extracted, skipped = await extract_transactions(profile, pages, source,
-                lambda count: _statement_progress(job_id, user_id, pages=count), rejection_reasons)
+                lambda count: _statement_progress(job_id, user_id, pages=count), rejection_reasons, rejected_rows)
             transactions.extend(extracted)
             rejected += skipped
             if len(transactions) > MAX_TRANSACTIONS:
                 raise StatementError('Too many transactions. Split the documents into smaller analyses.')
         result = build_candidates(transactions)
-        result.update({'warnings': warnings, 'rejected_transactions': rejected, 'rejection_reasons': rejection_reasons, 'account_id': account_id})
+        result.update({'warnings': warnings, 'rejected_transactions': rejected, 'rejection_reasons': rejection_reasons,
+                       'rejected_rows': rejected_rows, 'transactions': transactions, 'account_id': account_id, 'source_kind': 'documents'})
+        if rejected > len(rejected_rows):
+            result['warnings'].append('Review details are limited to the first 2000 rejected bookings. Split the documents to review the rest.')
         if not transactions and not rejected:
             result['warnings'].append('No readable transactions found. Check the statement format and model image capability.')
         with SessionLocal() as db:
@@ -2106,6 +2124,91 @@ def statement_job(job_id: str, user: User = Depends(current_user), db: Session =
     return _statement_dict(_owned_statement(db, user.id, job_id), db, details=True)
 
 
+async def _read_csv(file: UploadFile, delimiter: str, encoding: str, header_row: int):
+    try:
+        if not (file.filename or '').lower().endswith('.csv'):
+            raise HTTPException(400, 'Select a CSV file.')
+        raw = await file.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            raise HTTPException(413, 'Maximum CSV upload size is 20 MB.')
+        return await run_in_threadpool(csv_table, raw, delimiter, encoding, header_row)
+    except StatementError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        await file.close()
+
+
+@app.post('/api/ai/statements/csv/preview')
+async def preview_statement_csv(file: UploadFile = File(...), delimiter: str = Form(''), encoding: str = Form('auto'),
+        header_row: int = Form(0), user: User = Depends(current_user)):
+    table = await _read_csv(file, delimiter, encoding, header_row)
+    return {key: table[key] for key in ('columns', 'mapping', 'delimiter', 'encoding', 'header_row')} | {
+        'sample': [{'line': line, 'cells': [cell[:200] for cell in cells]} for line, cells in table['rows'][:5]],
+        'row_count': len(table['rows'])}
+
+
+@app.post('/api/ai/statements/csv/import', status_code=201)
+async def import_statement_csv(file: UploadFile = File(...), mapping: str = Form(...),
+        delimiter: str = Form(''), encoding: str = Form('auto'), header_row: int = Form(0),
+        direction: str = Form('signed'), date_format: str = Form('auto'), account_id: int | None = Form(None),
+        user: User = Depends(current_user), db: Session = Depends(get_db)):
+    validate_catalog_access(db, user, None, account_id)
+    source = (file.filename or 'bank.csv').replace('\\', '/').rsplit('/', 1)[-1][:180]
+    table = await _read_csv(file, delimiter, encoding, header_row)
+    try:
+        fields = json.loads(mapping)
+        transactions, rejected, diagnostics = await run_in_threadpool(csv_transactions, table, fields, source, direction, date_format)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, StatementError) else 'Invalid CSV mapping.')
+    result = build_candidates(transactions)
+    result.update(transactions=transactions, rejected_rows=rejected, rejection_reasons=diagnostics,
+                  rejected_transactions=len(rejected), account_id=account_id, warnings=[], source_kind='csv')
+    job = StatementJob(id=str(uuid.uuid4()), user_id=user.id, status='ready', file_count=1,
+                       total_pages=1, completed_pages=1, result_encrypted=encrypt_secret(json.dumps(result, ensure_ascii=False)))
+    db.add(job); db.commit(); db.refresh(job)
+    return _statement_dict(job, db, details=True)
+
+
+class StatementCorrectionIn(BaseModel):
+    date: str = Field(max_length=32)
+    merchant: str = Field(max_length=160)
+    amount: str | float
+    currency: str = Field(max_length=8)
+    entry_type: str = Field(max_length=16)
+    reference: str = Field(default='', max_length=160)
+    reviewed: bool = False
+
+
+@app.post('/api/ai/statements/{job_id}/rejected/{row_id}/review')
+def review_statement_booking(job_id: str, row_id: str, data: StatementCorrectionIn,
+        user: User = Depends(current_user), db: Session = Depends(get_db)):
+    with _STATEMENT_REVIEW_LOCK:
+        job = _owned_statement(db, user.id, job_id)
+        if job.status != 'ready':
+            raise HTTPException(409, 'Statement analysis is not ready.')
+        result = _statement_result(job)
+        rejected = next((row for row in result.get('rejected_rows', []) if row['id'] == row_id), None)
+        if not rejected:
+            raise HTTPException(404, 'Rejected booking not found or already reviewed.')
+        try:
+            booking = correct_booking(rejected, data.model_dump(exclude={'reviewed'}), data.reviewed)
+        except StatementError as exc:
+            raise HTTPException(400, str(exc))
+        transactions = result.get('transactions', []) + [booking]
+        if len(transactions) > MAX_TRANSACTIONS:
+            raise HTTPException(400, 'Too many transactions. Split the analysis.')
+        result.update(build_candidates(transactions))
+        result['transactions'] = transactions
+        result['rejected_rows'] = [row for row in result['rejected_rows'] if row['id'] != row_id]
+        result['rejected_transactions'] = max(0, result.get('rejected_transactions', 0) - 1)
+        reasons = result.get('rejection_reasons', {})
+        reasons[rejected['reason']] = max(0, reasons.get(rejected['reason'], 0) - 1)
+        result['rejection_reasons'] = {key: value for key, value in reasons.items() if value}
+        job.result_encrypted = encrypt_secret(json.dumps(result, ensure_ascii=False))
+        db.commit()
+        return _statement_dict(job, db, details=True)
+
+
 @app.delete('/api/ai/statements/{job_id}')
 def delete_statement_job(job_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     job = _owned_statement(db, user.id, job_id)
@@ -2114,27 +2217,43 @@ def delete_statement_job(job_id: str, user: User = Depends(current_user), db: Se
     return {'ok': True}
 
 
+class StatementImportIn(ExpenseIn):
+    target_expense_id: int | None = Field(default=None, gt=0)
+
+
 @app.post('/api/ai/statements/{job_id}/candidates/{candidate_id}/import')
-def import_statement_candidate(job_id: str, candidate_id: str, data: ExpenseIn,
+def import_statement_candidate(job_id: str, candidate_id: str, data: StatementImportIn,
         background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
     job = _owned_statement(db, user.id, job_id)
     if data.currency != 'EUR':
         raise HTTPException(400, 'The dashboard uses EUR. Convert non-EUR statement amounts manually before importing.')
     if job.status != 'ready':
         raise HTTPException(409, 'Statement analysis is not ready.')
-    candidate = next((c for c in _statement_result(job).get('candidates', []) if c['id'] == candidate_id), None)
+    result = _statement_result(job)
+    candidate = next((c for c in result.get('candidates', []) + result.get('single_candidates', []) if c['id'] == candidate_id), None)
     if not candidate:
         raise HTTPException(404, 'Candidate not found')
     imported = db.scalar(select(StatementImport).where(StatementImport.job_id == job_id, StatementImport.candidate_id == candidate_id))
     if imported:
         raise HTTPException(409, 'This candidate has already been imported. Edit the existing entry instead.')
     validate_catalog_access(db, user, data.category_id, data.account_id)
-    x = Expense(**normalized_expense_data(data), created_by=user.id)
+    expense_data = ExpenseIn.model_validate(data.model_dump(exclude={'target_expense_id'}))
+    if data.target_expense_id:
+        x = owned_expense(db, user, data.target_expense_id)
+        if x.entry_type != data.entry_type or x.currency != data.currency:
+            raise HTTPException(400, 'Existing entry must have the same direction and currency.')
+        if round(x.amount, 2) != round(data.amount, 2) and not data.price_effective_from:
+            raise HTTPException(400, 'Confirm the effective date for this price change.')
+    else:
+        x = Expense(**normalized_expense_data(expense_data), created_by=user.id)
     try:
-        db.add(x); db.flush()
-        db.add(ExpensePrice(expense_id=x.id, amount=data.amount, valid_from=data.price_effective_from or data.start_date or date.today()))
+        if data.target_expense_id:
+            _apply_expense_update(db, user, x, expense_data)
+        else:
+            db.add(x); db.flush()
+            db.add(ExpensePrice(expense_id=x.id, amount=data.amount, valid_from=data.price_effective_from or data.start_date or date.today()))
         db.add(StatementImport(job_id=job_id, candidate_id=candidate_id, expense_id=x.id))
-        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='statement_import', changes_json='{}'))
+        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='statement_update' if data.target_expense_id else 'statement_import', changes_json='{}'))
         db.commit()
     except IntegrityError:
         db.rollback()

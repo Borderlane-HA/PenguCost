@@ -6,6 +6,7 @@ counts, duplicate uploads, amounts and intervals. Nothing creates entries here.
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import io
 import json
@@ -281,7 +282,100 @@ def document_pages(name: str, raw: bytes) -> list[dict]:
         raise StatementError('Document cannot be read. Check the format; unlock password-protected PDFs before upload.') from exc
 
 
-def parse_transactions(reply: str, pages: list[dict], source: str, diagnostics: dict | None = None) -> tuple[list[dict], int]:
+def _review_excerpt(row: dict, page: dict) -> str:
+    """Retain only a bounded original booking excerpt, never whole pages/images."""
+    excerpt = _source_excerpt(row, page)
+    if excerpt:
+        return excerpt
+    if 'image' in page:
+        return str(row.get('evidence') or '')[:600]
+    try:
+        item = Transaction.model_validate({**row, 'evidence': 'review'})
+    except (ValueError, TypeError):
+        return ''
+    lines = page.get('text', '').splitlines()
+    best, best_score = '', 0
+    for start in range(len(lines)):
+        for end in range(start + 1, min(start + 8, len(lines)) + 1):
+            value = '\n'.join(lines[start:end])
+            if len(value) > 600:
+                break
+            # At least two independently matching fields identify a likely booking.
+            date_match = _booking_evidence_reason(item, value, page) != 'evidence_date'
+            merchant_match = normalized(item.merchant) in normalized(value)
+            # Amount matching must work even if the proposed date is incorrect.
+            tokens = re.findall(r'(?<![\w.,])[-+]?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)[.,]\d{2}(?![\d.,])[-+]?', value)
+            amount_match = False
+            for token in tokens:
+                try:
+                    amount_match |= abs(_amount_value(token)) == item.amount
+                except (ValueError, ArithmeticError):
+                    pass
+            score = int(date_match) + int(amount_match) + int(merchant_match)
+            if score >= 2 and (score > best_score or (score == best_score and len(value) < len(best))):
+                best, best_score = value, score
+    return best
+
+
+def rejected_booking(row, pages: list[dict], source: str, reason: str, index: int) -> dict:
+    raw = dict(row) if isinstance(row, dict) else {}
+    value = _normalise_row(raw, pages)
+    page = next((p for p in pages if str(p['page']) == str(value.get('page'))), None)
+    # Invalid values become empty editable fields; arbitrary provider errors are not retained.
+    fields = {'merchant': str(value.get('merchant') or '')[:160],
+              'reference': str(value.get('reference') or '')[:160], 'date': '', 'amount': '',
+              'currency': value.get('currency') if re.fullmatch(r'[A-Z]{3}', str(value.get('currency'))) else '',
+              'entry_type': value.get('entry_type') if value.get('entry_type') in {'income', 'expense'} else ''}
+    try:
+        fields['date'] = _date_value(str(value.get('date') or '')).isoformat()
+    except ValueError:
+        pass
+    try:
+        amount = _amount_value(value.get('amount'))
+        if 0 < amount <= 1_000_000_000 and amount == amount.quantize(Decimal('0.01')):
+            fields['amount'] = float(amount)
+    except (ValueError, ArithmeticError):
+        pass
+    return {'id': hashlib.sha256(f'{source}:{index}:{json.dumps(raw, sort_keys=True, default=str)}'.encode()).hexdigest()[:24],
+            'source': source, 'page': page['page'] if page else None, 'reason': reason, 'fields': fields,
+            'evidence': _review_excerpt(value, page) if page else '', 'vision': bool(page and 'image' in page),
+            'year_context': ' '.join(sorted(set(re.findall(r'\b(?:19|20)\d{2}\b', (page or {}).get('year_context', '') + (page or {}).get('text', '')[:1200])))),
+            'account_key': hashlib.sha256(normalized(str(value.get('account_key') or '')).encode()).hexdigest() if value.get('account_key') else ''}
+
+
+def correct_booking(rejected: dict, fields: dict, reviewed: bool) -> dict:
+    if not reviewed:
+        raise StatementError('Confirm that you checked the original booking and its direction.')
+    if not rejected.get('evidence'):
+        raise StatementError('No original booking excerpt is available. Upload the original again or create an entry manually.')
+    row = _normalise_row({**fields, 'page': rejected.get('page'), 'evidence': rejected['evidence']}, [])
+    try:
+        item = Transaction.model_validate(row)
+        if not normalized(item.merchant):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise StatementError('Check booking date, merchant, positive amount, currency and direction.')
+    if not rejected.get('vision'):
+        evidence = rejected['evidence']
+        if rejected.get('csv_date_format') == 'mdy':
+            def iso_mdy(match):
+                try:
+                    return datetime.strptime(match.group(), '%m/%d/%Y').date().isoformat()
+                except ValueError:
+                    return match.group()
+            evidence = re.sub(r'\b\d{1,2}/\d{1,2}/\d{4}\b', iso_mdy, evidence)
+        reason = _booking_evidence_reason(item, evidence, {'year_context': rejected.get('year_context', ''), 'text': ''})
+        if reason:
+            raise StatementError(reason)
+    value = item.model_dump(mode='json')
+    value.update(amount=float(item.amount), source=rejected['source'], vision=rejected.get('vision', False),
+                 account_key=rejected.get('account_key', ''), manually_reviewed=True)
+    if rejected.get('source_line'):
+        value['source_line'] = rejected['source_line']
+    return value
+
+
+def parse_transactions(reply: str, pages: list[dict], source: str, diagnostics: dict | None = None, rejected_rows: list | None = None) -> tuple[list[dict], int]:
     text = re.sub(r'<think>[\s\S]*?</think>', '', reply, flags=re.I).strip()
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.I).strip()
     try:
@@ -293,7 +387,8 @@ def parse_transactions(reply: str, pages: list[dict], source: str, diagnostics: 
         raise StatementError('Invalid or oversized transaction response from AI.')
     allowed = {p['page']: p for p in pages}
     accepted, skipped = [], 0
-    for row in rows:
+    for index, raw_row in enumerate(rows):
+        row = raw_row
         reason = 'schema_other'
         try:
             if not isinstance(row, dict):
@@ -336,10 +431,14 @@ def parse_transactions(reply: str, pages: list[dict], source: str, diagnostics: 
             skipped += 1
             if diagnostics is not None:
                 diagnostics[reason] = diagnostics.get(reason, 0) + 1
+        else:
+            continue
+        if rejected_rows is not None and len(rejected_rows) < MAX_TRANSACTIONS:
+            rejected_rows.append(rejected_booking(raw_row, pages, source, reason, index))
     return accepted, skipped
 
 
-async def extract_transactions(profile: dict, pages: list[dict], source: str, progress, diagnostics: dict | None = None) -> tuple[list[dict], int]:
+async def extract_transactions(profile: dict, pages: list[dict], source: str, progress, diagnostics: dict | None = None, rejected_rows: list | None = None) -> tuple[list[dict], int]:
     transactions, skipped = [], 0
     profile = dict(profile)
     max_tokens = profile.pop('statement_max_tokens', 0 if profile.get('provider') == 'ollama' else 8000)
@@ -360,7 +459,7 @@ async def extract_transactions(profile: dict, pages: list[dict], source: str, pr
                 blocks.append({'type': 'image_url', 'image_url': {'url': page['image']}})
         content = blocks if any(p.get('image') for p in batch) else '\n'.join(b['text'] for b in blocks)
         reply = await _call_model(**profile, system=EXTRACTION_PROMPT, messages=[{'role': 'user', 'content': content}], max_tokens=max_tokens, require_complete=True, **model_options)
-        extracted, rejected = parse_transactions(reply, batch, source, diagnostics)
+        extracted, rejected = parse_transactions(reply, batch, source, diagnostics, rejected_rows)
         transactions.extend(extracted)
         skipped += rejected
         progress(len(batch))
@@ -401,18 +500,15 @@ def build_candidates(transactions: list[dict]) -> dict:
     for row in rows:
         key = (normalized(row['merchant']), normalized(row['reference']), row['account_key'], row['currency'], row['entry_type'])
         groups[key].append(row)
-    candidates, singletons = [], 0
+    candidates, singles = [], []
     for key, items in groups.items():
         items.sort(key=lambda x: (x['date'], x['source'], x['page']))
-        if len(items) < 2:
-            singletons += 1
-            continue
         dates = [date.fromisoformat(i['date']) for i in items]
         months = detect_interval(dates)
         amounts = [i['amount'] for i in items]
         variable = max(amounts) != min(amounts)
         regular = months is not None
-        candidates.append({
+        candidate = {
             'id': hashlib.sha256(json.dumps(key).encode()).hexdigest()[:24],
             'name': items[-1]['merchant'], 'provider': items[-1]['merchant'],
             'contract_reference': items[-1]['reference'], 'entry_type': items[-1]['entry_type'],
@@ -423,7 +519,131 @@ def build_candidates(transactions: list[dict]) -> dict:
             'variable_amount': variable, 'interval_months': months,
             'billing_interval': {1: 'monthly', 3: 'quarterly', 6: 'halfyearly', 12: 'yearly'}.get(months),
             'confidence': 'high' if regular and len(items) >= 3 and not variable and not any(i['vision'] for i in items) else 'medium' if regular else 'low',
-            'occurrences': [{k: i[k] for k in ('date', 'amount', 'source', 'page', 'evidence')} for i in items],
-        })
+            'occurrences': [{k: i[k] for k in ('date', 'amount', 'source', 'page', 'evidence', 'source_line') if k in i} for i in items],
+            'recurrence_type': 'one_time' if len(items) == 1 else 'recurring',
+        }
+        (singles if len(items) == 1 else candidates).append(candidate)
     candidates.sort(key=lambda x: (-x['count'], x['name'].casefold()))
-    return {'candidates': candidates, 'transaction_count': len(rows), 'duplicates_removed': duplicates, 'single_occurrences': singletons}
+    singles.sort(key=lambda x: (x['last_date'], x['name']), reverse=True)
+    return {'candidates': candidates, 'single_candidates': singles, 'transaction_count': len(rows), 'duplicates_removed': duplicates, 'single_occurrences': len(singles)}
+
+
+CSV_ALIASES = {
+    'date': ('buchungstag', 'buchungsdatum', 'bookingdate', 'date', 'datum'),
+    'merchant': ('beguenstigterzahlungspflichtiger', 'begunstigterzahlungspflichtiger', 'auftraggeberbegunstigter', 'namezahlungsbeteiligter', 'zahlungsempfaenger', 'zahlungsempfanger', 'zahlungspflichtiger', 'auftraggeber', 'empfaenger', 'empfanger', 'name', 'merchant', 'counterparty', 'payee'),
+    'amount': ('betrag', 'amount', 'umsatz', 'umsatzbetrag'),
+    'currency': ('waehrung', 'wahrung', 'currency'),
+    'entry_type': ('richtung', 'buchungsrichtung', 'direction', 'entrytype'),
+    'reference': ('vertragsnummer', 'contractreference', 'reference'),
+    'debit': ('soll', 'debit', 'belastung'), 'credit': ('haben', 'credit', 'gutschrift'),
+}
+
+
+def csv_table(raw: bytes, delimiter: str = '', encoding: str = 'auto', header_row: int = 0) -> dict:
+    if not raw or len(raw) > MAX_BYTES or b'\x00' in raw:
+        raise StatementError('CSV is empty, too large or not a supported text file.')
+    if encoding not in {'auto', 'utf-8-sig', 'cp1252'}:
+        raise StatementError('Unsupported CSV encoding.')
+    try:
+        try:
+            content = raw.decode('utf-8-sig' if encoding == 'auto' else encoding)
+            actual_encoding = 'utf-8-sig' if encoding == 'auto' else encoding
+        except UnicodeDecodeError:
+            if encoding != 'auto':
+                raise
+            content, actual_encoding = raw.decode('cp1252'), 'cp1252'
+        if delimiter not in {'', ';', ',', '\t', '|'}:
+            raise StatementError('Unsupported CSV delimiter.')
+        if not delimiter:
+            try:
+                delimiter = csv.Sniffer().sniff(content[:16000], delimiters=';,\t|').delimiter
+            except csv.Error:
+                delimiter = max(';\t,|', key=lambda d: content.splitlines()[0].count(d))
+        rows = []
+        for row in csv.reader(io.StringIO(content, newline=''), delimiter=delimiter, strict=True):
+            if len(row) > 64 or any(len(cell) > 24000 for cell in row):
+                raise StatementError('CSV contains too many columns or oversized fields.')
+            rows.append(row)
+            if len(rows) > MAX_TRANSACTIONS + 31:
+                raise StatementError('CSV exceeds 2000 bookings. Split the export.')
+    except (UnicodeError, csv.Error):
+        raise StatementError('CSV cannot be decoded. Check encoding and delimiter.')
+    aliases = {key: set(values) for key, values in CSV_ALIASES.items()}
+    if not rows:
+        raise StatementError('CSV contains no rows.')
+    if header_row == 0:
+        header_index = max(range(min(30, len(rows))), key=lambda i: sum(normalized(cell) in names for cell in rows[i] for names in aliases.values()))
+    elif 1 <= header_row <= min(30, len(rows)):
+        header_index = header_row - 1
+    else:
+        raise StatementError('Select a CSV header row between 1 and 30.')
+    columns = [cell.strip()[:160] or f'Column {i+1}' for i, cell in enumerate(rows[header_index])]
+    if len(columns) < 2:
+        raise StatementError('CSV needs at least two columns. Check the delimiter.')
+    body = [(i + 1, row) for i, row in enumerate(rows) if i > header_index and any(cell.strip() for cell in row)]
+    if len(body) > MAX_TRANSACTIONS:
+        raise StatementError('CSV exceeds 2000 bookings. Split the export.')
+    mapping = {key: next((i for i, cell in enumerate(columns) if normalized(cell) in names), None) for key, names in aliases.items()}
+    return {'columns': columns, 'rows': body, 'mapping': mapping, 'delimiter': delimiter,
+            'encoding': actual_encoding, 'header_row': header_index + 1}
+
+
+def csv_transactions(table: dict, mapping: dict, source: str, direction: str = 'signed', date_format: str = 'auto') -> tuple[list, list, dict]:
+    if direction not in {'signed', 'expense', 'income'} or date_format not in {'auto', 'dmy', 'mdy', 'iso'}:
+        raise StatementError('Invalid CSV direction or date format.')
+    if not isinstance(mapping, dict) or set(mapping) - set(CSV_ALIASES):
+        raise StatementError('Invalid CSV column mapping.')
+    for index in mapping.values():
+        if index is not None and (type(index) is not int or not 0 <= index < len(table['columns'])):
+            raise StatementError('Invalid CSV column mapping.')
+    required = ['date', 'merchant'] + (['amount'] if mapping.get('amount') is not None else ['debit', 'credit'])
+    if any(mapping.get(key) is None for key in required):
+        raise StatementError('Map date, counterparty and amount (or debit and credit).')
+    transactions, rejected, diagnostics = [], [], {}
+    for line, cells in table['rows']:
+        def cell(key):
+            index = mapping.get(key)
+            return cells[index].strip() if index is not None and index < len(cells) else ''
+        excerpt = '\n'.join(f'{table["columns"][index]}: {cells[index]}' for index in dict.fromkeys(mapping.values())
+                            if index is not None and index < len(cells))[:600]
+        row = {'date': cell('date'), 'merchant': cell('merchant'), 'amount': cell('amount'),
+               'currency': cell('currency') or 'EUR', 'entry_type': cell('entry_type'),
+               'reference': cell('reference'), 'account_key': '', 'page': 1, 'evidence': excerpt}
+        reason = 'schema_other'
+        try:
+            if len(cells) != len(table['columns']):
+                raise ValueError()
+            reason = 'schema_date'
+            row['date'] = (_date_value(row['date']) if date_format in {'auto', 'dmy'} else
+                           datetime.strptime(row['date'], '%m/%d/%Y' if date_format == 'mdy' else '%Y-%m-%d').date()).isoformat()
+            reason = 'schema_amount'
+            if mapping.get('amount') is None:
+                debit = _amount_value(cell('debit') or 0)
+                credit = _amount_value(cell('credit') or 0)
+                if bool(debit) == bool(credit):
+                    raise ValueError()
+                amount = -abs(debit) if debit else abs(credit)
+            else:
+                amount = _amount_value(row['amount'])
+            row['amount'] = abs(amount)
+            if not row['entry_type']:
+                row['entry_type'] = ('expense' if amount < 0 else 'income') if direction == 'signed' else direction
+            row = _normalise_row(row, [])
+            item = Transaction.model_validate(row)
+            if not normalized(item.merchant):
+                reason = 'schema_merchant'
+                raise ValueError()
+            value = item.model_dump(mode='json')
+            value.update(amount=float(item.amount), source=source, vision=False, source_line=line)
+            transactions.append(value)
+            continue
+        except ValidationError as exc:
+            field = str(exc.errors()[0]['loc'][0])
+            reason = 'schema_' + field if field in {'date', 'amount', 'currency', 'entry_type', 'merchant', 'evidence'} else 'schema_other'
+        except (ValueError, TypeError, ArithmeticError):
+            pass
+        diagnostics[reason] = diagnostics.get(reason, 0) + 1
+        review = rejected_booking(row, [{'page': 1, 'text': excerpt}], source, reason, line)
+        review.update(source_line=line, evidence=excerpt, csv_date_format=date_format)
+        rejected.append(review)
+    return transactions, rejected, diagnostics
