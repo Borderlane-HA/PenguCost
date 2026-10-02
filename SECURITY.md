@@ -44,3 +44,17 @@ Income entries, expenses, contracts, dashboard selections, reminders and AI payl
 - Users can change their own password only after confirming the current password.
 - Administrators can reset passwords for any local account, including their own, from User management. Password changes/reset invalidate older signed-in sessions for that account.
 - Use a unique, sufficiently long password for every PenguCost account.
+
+
+## Bank statement uploads (0.5.0)
+
+Statement processing explicitly confirms transmission to the selected AI profile.
+Text-PDF content or scan/photo pages go to that profile; external providers apply
+their own retention policies. Raw uploads are temporary and not retained in the
+PenguCost volume. Candidates and source evidence are encrypted with the same
+Fernet key used for AI secrets, isolated per user and excluded from portable JSON
+exports. Volume backups include encrypted results and matching key material.
+Deleting a job discards its results and stops subsequent processing; requests
+already received by a provider cannot be recalled. Document contents are treated
+as untrusted data, extracted fields and page evidence are validated, and imports
+require a separate review action. No model has finance-write tools.

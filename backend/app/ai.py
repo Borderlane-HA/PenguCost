@@ -53,7 +53,23 @@ def _url(provider: str, base_url: str) -> tuple[str, bool]:
     return (base if base.endswith('/chat/completions') else base + '/chat/completions'), False
 
 
-async def _call_model(provider: str, base_url: str, api_key: str, model: str, system: str, messages: list[dict], max_tokens: int = 3200) -> str:
+def _anthropic_content(content):
+    if not isinstance(content, list):
+        return content
+    blocks = []
+    for block in content:
+        if block.get('type') == 'image_url':
+            url = block['image_url']['url']
+            if not url.startswith('data:image/') or ';base64,' not in url:
+                raise RuntimeError('Only inline document images are supported')
+            media_type, data = url[5:].split(';base64,', 1)
+            blocks.append({'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': data}})
+        else:
+            blocks.append(block)
+    return blocks
+
+
+async def _call_model(provider: str, base_url: str, api_key: str, model: str, system: str, messages: list[dict], max_tokens: int = 3200, require_complete: bool = False) -> str:
     url, anthropic = _url(provider, base_url)
     timeout = httpx.Timeout(600.0, connect=30.0)
     if anthropic:
@@ -62,7 +78,7 @@ async def _call_model(provider: str, base_url: str, api_key: str, model: str, sy
             'max_tokens': max_tokens,
             'temperature': 0.2,
             'system': system,
-            'messages': [{'role': m['role'], 'content': m['content']} for m in messages if m['role'] in {'user', 'assistant'}],
+            'messages': [{'role': m['role'], 'content': _anthropic_content(m['content'])} for m in messages if m['role'] in {'user', 'assistant'}],
         }
         headers = {'Content-Type': 'application/json', 'anthropic-version': '2023-06-01'}
         if api_key:
@@ -71,6 +87,8 @@ async def _call_model(provider: str, base_url: str, api_key: str, model: str, sy
             response = await client.post(url, json=body, headers=headers)
             response.raise_for_status()
             data = response.json()
+            if require_complete and data.get('stop_reason') == 'max_tokens':
+                raise RuntimeError('AI response truncated; use smaller documents or a model with a larger output limit')
             content = data.get('content') or []
             if not content:
                 raise RuntimeError('Claude returned no content')
@@ -92,7 +110,12 @@ async def _call_model(provider: str, base_url: str, api_key: str, model: str, sy
         choices = data.get('choices') or []
         if not choices:
             raise RuntimeError('AI provider returned no choices')
-        return (choices[0].get('message') or {}).get('content', '').strip()
+        if require_complete and choices[0].get('finish_reason') in {'length', 'content_filter'}:
+            raise RuntimeError('AI response incomplete; use smaller documents or another model')
+        content = (choices[0].get('message') or {}).get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError('AI provider returned no text content')
+        return content.strip()
 
 
 async def analyze_costs(provider: str, base_url: str, api_key: str, model: str, payload: dict, goal: str, language: str='de') -> str:

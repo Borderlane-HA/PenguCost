@@ -20,7 +20,7 @@ The frontend is compiled during the Docker build and copied into the backend ima
 - `.session_secret`
 - `.fernet_key`
 
-All three must be included in backups. Losing the Fernet key means already stored AI API keys can no longer be decrypted, but financial data remains readable.
+All three must be included in backups. Losing the Fernet key means stored AI API keys and encrypted statement-analysis results can no longer be decrypted, while normal financial entries remain readable.
 
 ## Multi-user ownership
 
@@ -77,3 +77,17 @@ AI profile credentials remain administrator-managed. Claude uses the native Anth
 Reminder actions are stored separately from financial entries using an event key built from reminder kind, cancellation deadline and effective contract end. This lets a user dismiss the current reminder without permanently muting the contract: a later renewal cycle creates a new event key and can notify again.
 
 Marking a contract as cancelled disables automatic renewal and freezes the currently effective contract end. The expense remains active until that date so current cost calculations are not reduced prematurely.
+
+
+## Statement analysis
+
+The multipart endpoint validates consent, file signatures, size, ownership and
+profile, creates a UUID job and responds with 202. Source bytes stay temporary.
+The background worker locally extracts PDF text or bounded image pages, makes
+model calls in two-page batches and validates transaction JSON/evidence.
+Python then deduplicates and groups transactions and determines recurrence;
+it does not trust model-reported counts or cadence. Encrypted candidates are
+stored in `statement_jobs`, while `statement_imports` guards reviewed entry
+creation with a unique job/candidate pair. Polling returns only owned jobs and
+results. Running jobs are marked interrupted after restart; completed results
+remain available. See [Statement assistant](STATEMENT-ASSISTANT.md).

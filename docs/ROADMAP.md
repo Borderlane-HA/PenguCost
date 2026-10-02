@@ -24,6 +24,13 @@
 - Inline administrator category creation
 - Local modern favicon
 
+## 0.5 — Bank statement assistant ✅
+- PDF/JPG/PNG upload with text/vision AI extraction
+- Evidence-backed repeated debit/income candidates and cadence detection
+- Sequential reviewed imports and duplicate protection
+- Encrypted results with user isolation and cancellation
+- Backend regression tests and safer backup restore
+
 ## Next
 - External delivery of reminder-center events (Home Assistant webhook / SMTP)
 - CSV import wizard

@@ -127,6 +127,7 @@ class AIProfile(Base):
     base_url: Mapped[str] = mapped_column(String(500), default='')
     model: Mapped[str] = mapped_column(String(200), default='')
     api_key: Mapped[str] = mapped_column(Text, default='')
+    statement_max_tokens: Mapped[int] = mapped_column(Integer, default=8000)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -167,3 +168,25 @@ class Setting(Base):
     __tablename__ = 'settings'
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default='')
+
+
+class StatementJob(Base):
+    __tablename__ = 'statement_jobs'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    status: Mapped[str] = mapped_column(String(20), default='running', index=True)
+    completed_pages: Mapped[int] = mapped_column(Integer, default=0)
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    result_encrypted: Mapped[str] = mapped_column(Text, default='')
+    last_error: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class StatementImport(Base):
+    __tablename__ = 'statement_imports'
+    __table_args__ = (UniqueConstraint('job_id', 'candidate_id', name='uq_statement_import'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey('statement_jobs.id'), index=True)
+    candidate_id: Mapped[str] = mapped_column(String(24))
+    expense_id: Mapped[int] = mapped_column(ForeignKey('expenses.id'))

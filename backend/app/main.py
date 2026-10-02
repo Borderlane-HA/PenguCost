@@ -1,6 +1,8 @@
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 import calendar
+import uuid
+import httpx
 import hashlib
 import ipaddress
 import json
@@ -13,22 +15,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Literal, Any
 
-from fastapi import FastAPI, Depends, HTTPException, Response, Query, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Response, Query, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from sqlalchemy import select, func, inspect, text
+from pydantic import BaseModel, Field, field_validator, ValidationError
+from sqlalchemy import select, func, inspect, text, delete
+from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from .db import Base, engine, get_db, SessionLocal, DATA_DIR
 from .models import (
     User, Expense, ExpensePrice, Account, Category, Setting, ReminderAction,
-    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange,
+    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange, StatementJob, StatementImport,
 )
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import analyze_costs, chat_finances
+from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, StatementError,
+    document_kind, document_pages, extract_transactions, build_candidates, normalized)
 
-APP_VERSION = '0.4.11'
+APP_VERSION = '0.5.0'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -61,6 +67,10 @@ def migrate_schema():
         with engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
+    profile_columns = {c['name'] for c in inspect(engine).get_columns('ai_profiles')}
+    if 'statement_max_tokens' not in profile_columns:
+        with engine.begin() as conn:
+            conn.execute(text('ALTER TABLE ai_profiles ADD COLUMN statement_max_tokens INTEGER DEFAULT 8000'))
     user_columns = {c['name'] for c in inspect(engine).get_columns('users')}
     if 'session_version' not in user_columns:
         with engine.begin() as conn:
@@ -273,14 +283,14 @@ class CategoryPatch(BaseModel):
 
 
 class ExpenseIn(BaseModel):
-    name: str
-    provider: str = ''
+    name: str = Field(min_length=1, max_length=160)
+    provider: str = Field(default='', max_length=160)
     provider_website: str = ''
     entry_type: Literal['expense', 'income'] = 'expense'
-    amount: float = Field(gt=0)
-    currency: str = 'EUR'
-    billing_interval: str = 'monthly'
-    interval_months: int = 1
+    amount: float = Field(gt=0, allow_inf_nan=False)
+    currency: str = Field(default='EUR', pattern=r'^[A-Z]{3}$')
+    billing_interval: Literal['monthly', 'quarterly', 'halfyearly', 'yearly', 'custom'] = 'monthly'
+    interval_months: int = Field(default=1, ge=1, le=1200)
     category_id: Optional[int] = None
     account_id: Optional[int] = None
     start_date: Optional[date] = None
@@ -289,10 +299,10 @@ class ExpenseIn(BaseModel):
     cancellation_date: Optional[date] = None
     minimum_term_months: Optional[int] = Field(default=None, ge=1)
     renewal_period_months: Optional[int] = Field(default=None, ge=1)
-    renewal_amount: Optional[float] = Field(default=None, gt=0)
-    cancellation_notice_days: Optional[int] = None
+    renewal_amount: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    cancellation_notice_days: Optional[int] = Field(default=None, ge=0, le=36500)
     auto_renew: bool = False
-    status: str = 'active'
+    status: Literal['active', 'paused', 'cancelled', 'ended'] = 'active'
     essential: bool = False
     recurrence_type: Literal['recurring', 'one_time'] = 'recurring'
     amount_estimated: bool = False
@@ -302,6 +312,21 @@ class ExpenseIn(BaseModel):
     notes: str = ''
     price_effective_from: Optional[date] = None
 
+    @field_validator('name')
+    @classmethod
+    def nonblank_name(cls, value: str):
+        if not value.strip():
+            raise ValueError('Name cannot be blank')
+        return value.strip()
+
+    @field_validator('contract_url', 'provider_website')
+    @classmethod
+    def safe_link(cls, value: str):
+        value = value.strip()
+        if value and urlparse(value).scheme not in {'http', 'https'}:
+            raise ValueError('Links must use http:// or https://')
+        return value
+
 
 class AIProfileIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -310,6 +335,7 @@ class AIProfileIn(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     api_key: str = ''
     enabled: bool = True
+    statement_max_tokens: int = Field(default=8000, ge=1000, le=32000)
 
 
 class AIProfilePatch(BaseModel):
@@ -319,6 +345,7 @@ class AIProfilePatch(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     enabled: Optional[bool] = None
+    statement_max_tokens: Optional[int] = Field(default=None, ge=1000, le=32000)
 
 
 class ReminderSettingsIn(BaseModel):
@@ -419,6 +446,8 @@ def is_effectively_active(x: Expense, when: date | None = None) -> bool:
     # Only paused/ended entries are excluded from current reporting.
     if x.status in {'paused', 'ended'}:
         return False
+    if x.start_date and x.start_date > when:
+        return False
     end = effective_contract_end(x, when)
     return not end or end >= when
 
@@ -426,7 +455,7 @@ def is_effectively_active(x: Expense, when: date | None = None) -> bool:
 def expense_dict(x: Expense, as_of: date | None = None):
     today = as_of or date.today()
     current_amount = price_at(x, today)
-    months = x.interval_months or {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}.get(x.billing_interval, 1)
+    months = max(1, x.interval_months or 1) if x.billing_interval == 'custom' else {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}.get(x.billing_interval, 1)
     if (x.recurrence_type or 'recurring') == 'one_time':
         due = x.next_due_date or x.start_date
         monthly = round(current_amount if due and due.year == today.year and due.month == today.month else 0, 2)
@@ -533,7 +562,7 @@ def ai_profile_dict(x: AIProfile, admin: bool = False):
     provider = PROVIDER_MAP.get(x.provider, PROVIDER_MAP['custom'])
     row = {
         'id': x.id, 'name': x.name, 'provider': x.provider, 'provider_label': provider['label'],
-        'model': x.model, 'enabled': x.enabled,
+        'model': x.model, 'enabled': x.enabled, 'statement_max_tokens': x.statement_max_tokens,
     }
     if admin:
         row.update({'base_url': x.base_url, 'has_api_key': bool(x.api_key)})
@@ -542,7 +571,11 @@ def ai_profile_dict(x: AIProfile, admin: bool = False):
 
 @app.on_event('startup')
 def startup():
-    db = next(get_db())
+    db = SessionLocal()
+    # Background jobs cannot resume without their ephemeral document bytes.
+    db.execute(text("UPDATE statement_jobs SET status='error', last_error='Analysis interrupted by server restart. Upload the documents again.' WHERE status='running'"))
+    db.execute(text("UPDATE ai_conversations SET status='error', last_error='Analysis interrupted by server restart. Send the request again.' WHERE status='running'"))
+    db.commit()
     seed(db)
     changed = False
     for item in db.scalars(select(Expense)):
@@ -879,6 +912,8 @@ def validate_catalog_access(db: Session, user: User, category_id: int | None, ac
 
 def normalized_expense_data(data: ExpenseIn):
     payload = data.model_dump(exclude={'price_effective_from'})
+    if data.billing_interval != 'custom':
+        payload['interval_months'] = {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}[data.billing_interval]
     if not payload.get('contract_end') and payload.get('start_date') and payload.get('minimum_term_months'):
         payload['contract_end'] = add_months(payload['start_date'], payload['minimum_term_months']) - timedelta(days=1)
     if not payload.get('cancellation_date') and payload.get('contract_end') and payload.get('cancellation_notice_days') is not None:
@@ -942,6 +977,8 @@ def update_expense(item_id: int, data: ExpenseIn, background_tasks: BackgroundTa
 @app.delete('/api/expenses/{item_id}')
 def delete_expense(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = owned_expense(db, user, item_id)
+    db.execute(delete(ExpenseChange).where(ExpenseChange.expense_id == x.id))
+    db.execute(delete(ReminderAction).where(ReminderAction.expense_id == x.id))
     db.delete(x)
     db.commit()
     return {'ok': True}
@@ -980,10 +1017,14 @@ def bulk_expenses(data: BulkExpenseIn, user: User = Depends(current_user), db: S
         validate_catalog_access(db, user, int(data.value), None)
     if data.action == 'account' and data.value not in (None, ''):
         validate_catalog_access(db, user, None, int(data.value))
+    if data.action == 'status' and data.value not in {'active', 'paused', 'cancelled', 'ended'}:
+        raise HTTPException(400, 'Invalid expense status')
     rows = list(db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.id.in_(data.ids))))
     changed = 0
     for x in rows:
         if data.action == 'delete':
+            db.execute(delete(ExpenseChange).where(ExpenseChange.expense_id == x.id))
+            db.execute(delete(ReminderAction).where(ReminderAction.expense_id == x.id))
             db.delete(x)
             changed += 1
             continue
@@ -1363,7 +1404,7 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
 
 
 def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, account_id: int | None) -> Expense:
-    return Expense(
+    x = Expense(
         name=str(row.get('name') or 'Imported entry')[:160], provider=str(row.get('provider') or '')[:160], provider_website=str(row.get('provider_website') or '')[:500],
         entry_type=('income' if row.get('entry_type') == 'income' else 'expense'),
         amount=float(row.get('amount') or 0), currency=str(row.get('currency') or 'EUR')[:8],
@@ -1376,6 +1417,14 @@ def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, a
         essential=bool(row.get('essential', False)), recurrence_type=('one_time' if row.get('recurrence_type') == 'one_time' else 'recurring'), amount_estimated=bool(row.get('amount_estimated', False)), contract_url=str(row.get('contract_url') or '')[:500], contract_reference=str(row.get('contract_reference') or '')[:160], tags=str(row.get('tags') or '')[:255], notes=str(row.get('notes') or ''),
         created_by=user_id, created_at=_datetime(row.get('created_at')), updated_at=_datetime(row.get('updated_at')),
     )
+
+    try:
+        validated = ExpenseIn.model_validate({key: getattr(x, key) for key in ExpenseIn.model_fields if key != 'price_effective_from'})
+        for key, value in normalized_expense_data(validated).items():
+            setattr(x, key, value)
+    except ValidationError:
+        raise HTTPException(400, 'Export contains an invalid financial entry. Existing data has not been changed.')
+    return x
 
 
 @app.get('/api/export/user')
@@ -1419,6 +1468,11 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
     expenses_in = payload.get('expenses') or []
     if not isinstance(expenses_in, list):
         raise HTTPException(400, 'Invalid expenses payload')
+    if db.scalar(select(StatementJob.id).where(StatementJob.user_id == user.id, StatementJob.status == 'running')) or db.scalar(select(AIConversation.id).where(AIConversation.user_id == user.id, AIConversation.status == 'running')):
+        raise HTTPException(409, 'Wait for running AI analyses or cancel them before importing data')
+    for job in list(db.scalars(select(StatementJob).where(StatementJob.user_id == user.id))):
+        db.execute(delete(StatementImport).where(StatementImport.job_id == job.id))
+        db.delete(job)
     # Replace only this user's private data. Global admin catalogs and every other user's data remain untouched.
     for c in list(db.scalars(select(AIConversation).where(AIConversation.user_id == user.id))):
         for m in list(db.scalars(select(AIMessage).where(AIMessage.conversation_id == c.id))): db.delete(m)
@@ -1428,6 +1482,7 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
     expense_ids = list(db.scalars(select(Expense.id).where(Expense.created_by == user.id)))
     if expense_ids:
         for r in list(db.scalars(select(ReminderAction).where(ReminderAction.created_by == user.id))): db.delete(r)
+        db.execute(delete(ExpenseChange).where(ExpenseChange.expense_id.in_(expense_ids)))
         for x in list(db.scalars(select(Expense).where(Expense.created_by == user.id))): db.delete(x)
     for h in list(db.scalars(select(HiddenCatalogItem).where(HiddenCatalogItem.user_id == user.id))): db.delete(h)
     for x in list(db.scalars(select(Category).where(Category.created_by == user.id))): db.delete(x)
@@ -1531,7 +1586,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
         'hidden_catalog_items': [{'id': x.id, 'user_id': x.user_id, 'item_type': x.item_type, 'item_id': x.item_id, 'created_at': _iso(x.created_at)} for x in db.scalars(select(HiddenCatalogItem).order_by(HiddenCatalogItem.id))],
         'expenses': [_raw_expense(x) for x in expenses],
         'reminder_actions': [{'id': r.id, 'expense_id': r.expense_id, 'event_key': r.event_key, 'action': r.action, 'snooze_until': _iso(r.snooze_until), 'created_by': r.created_by, 'created_at': _iso(r.created_at), 'updated_at': _iso(r.updated_at)} for r in db.scalars(select(ReminderAction).order_by(ReminderAction.id))],
-        'ai_profiles': [{'id': x.id, 'name': x.name, 'provider': x.provider, 'base_url': x.base_url, 'model': x.model, 'api_key': decrypt_secret(x.api_key), 'enabled': x.enabled, 'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIProfile).order_by(AIProfile.id))],
+        'ai_profiles': [{'id': x.id, 'name': x.name, 'provider': x.provider, 'base_url': x.base_url, 'model': x.model, 'statement_max_tokens': x.statement_max_tokens, 'api_key': decrypt_secret(x.api_key), 'enabled': x.enabled, 'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIProfile).order_by(AIProfile.id))],
         'ai_conversations': [{**_conversation_dict(x, db, True), 'user_id': x.user_id} for x in db.scalars(select(AIConversation).order_by(AIConversation.id))],
         'ai_brains': [{'user_id': x.user_id, 'summary': x.summary, 'updated_at': _iso(x.updated_at)} for x in db.scalars(select(AIBrain).order_by(AIBrain.user_id))],
         'settings': [{'key': x.key, 'value': x.value} for x in db.scalars(select(Setting).order_by(Setting.key))],
@@ -1541,6 +1596,9 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
 @app.post('/api/import/admin')
 def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     session_admin_id = admin.id
+    previous_session_versions = {u.id: int(u.session_version or 0) for u in db.scalars(select(User))}
+    if db.scalar(select(StatementJob.id).where(StatementJob.status == 'running')) or db.scalar(select(AIConversation.id).where(AIConversation.status == 'running')):
+        raise HTTPException(409, 'Wait for running AI analyses or cancel them before restoring data')
     if payload.get('format') != 'pengucost-admin-export':
         raise HTTPException(400, 'Not a PenguCost admin export')
     users_in = payload.get('users') or []
@@ -1549,11 +1607,11 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     # Destructive full restore. Order matters because expenses reference catalogs/users.
     # Detach the authenticated admin object so an imported user with the same primary key can be inserted cleanly.
     db.expunge(admin)
-    for table in ('ai_messages', 'ai_conversations', 'ai_brains', 'reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
+    for table in ('statement_imports', 'statement_jobs', 'expense_changes', 'ai_messages', 'ai_conversations', 'ai_brains', 'reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
         db.execute(text(f'DELETE FROM {table}'))
     db.flush()
     for u in users_in:
-        db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), session_version=int(u.get('session_version') or 0), created_at=_datetime(u.get('created_at'))))
+        db.add(User(id=int(u['id']), username=str(u['username']), display_name=str(u.get('display_name') or ''), password_hash=str(u['password_hash']), role=str(u.get('role') or 'member'), is_active=bool(u.get('is_active', True)), session_version=max(int(u.get('session_version') or 0), previous_session_versions.get(int(u['id']), 0)) + 1, created_at=_datetime(u.get('created_at'))))
     for x in payload.get('accounts') or []:
         db.add(Account(id=int(x['id']), name=str(x['name']), kind=str(x.get('kind') or 'bank'), note=str(x.get('note') or ''), created_by=x.get('created_by')))
     for x in payload.get('categories') or []:
@@ -1569,7 +1627,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     for r in payload.get('reminder_actions') or []:
         db.add(ReminderAction(id=int(r['id']), expense_id=int(r['expense_id']), event_key=str(r.get('event_key') or ''), action=str(r.get('action') or 'done'), snooze_until=_date(r.get('snooze_until')), created_by=r.get('created_by'), created_at=_datetime(r.get('created_at')), updated_at=_datetime(r.get('updated_at'))))
     for x in payload.get('ai_profiles') or []:
-        db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
+        db.add(AIProfile(id=int(x['id']), name=str(x.get('name') or 'AI'), provider=str(x.get('provider') or 'custom'), base_url=str(x.get('base_url') or ''), model=str(x.get('model') or ''), statement_max_tokens=min(32000,max(1000,int(x.get('statement_max_tokens') or 8000))), api_key=encrypt_secret(str(x.get('api_key') or '')), enabled=bool(x.get('enabled', True)), created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at'))))
     db.flush()
     for x in payload.get('ai_conversations') or []:
         conv = AIConversation(id=int(x['id']), user_id=int(x['user_id']), profile_id=x.get('profile_id'), title=str(x.get('title') or 'PenguCost AI')[:180], mode=str(x.get('mode') or 'analysis')[:24], target_savings=x.get('target_savings'), selected_expense_ids=json.dumps(x.get('selected_expense_ids') or []), status='idle', last_error='', created_at=_datetime(x.get('created_at')), updated_at=_datetime(x.get('updated_at')))
@@ -1605,7 +1663,7 @@ def add_ai_profile(data: AIProfileIn, _: User = Depends(require_admin), db: Sess
     x = AIProfile(
         name=data.name.strip(), provider=data.provider,
         base_url=(data.base_url.strip() or defaults['default_base_url']), model=data.model.strip(),
-        api_key=encrypt_secret(data.api_key), enabled=data.enabled,
+        api_key=encrypt_secret(data.api_key), enabled=data.enabled, statement_max_tokens=data.statement_max_tokens,
     )
     db.add(x)
     db.commit()
@@ -1632,6 +1690,8 @@ def update_ai_profile(profile_id: int, data: AIProfilePatch, _: User = Depends(r
         x.model = data.model.strip()
     if data.api_key:
         x.api_key = encrypt_secret(data.api_key)
+    if data.statement_max_tokens is not None:
+        x.statement_max_tokens = data.statement_max_tokens
     if data.enabled is not None:
         x.enabled = data.enabled
     db.commit()
@@ -1858,6 +1918,210 @@ async def ai_analyze(data: AIAnalyzeIn, user: User = Depends(current_user), db: 
         raise HTTPException(502, f'AI request failed: {e}')
 
 
+_STATEMENT_ADMISSION_LOCK = threading.Lock()
+
+
+@app.middleware('http')
+async def private_api_cache(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def _owned_statement(db: Session, user_id: int, job_id: str) -> StatementJob:
+    job = db.get(StatementJob, job_id)
+    if not job or job.user_id != user_id:
+        raise HTTPException(404, 'Statement analysis not found')
+    return job
+
+
+def _statement_result(job: StatementJob) -> dict:
+    if not job.result_encrypted:
+        return {}
+    value = decrypt_secret(job.result_encrypted)
+    if not value:
+        raise HTTPException(500, 'Statement results cannot be decrypted. Restore the original encryption key from backup.')
+    return json.loads(value)
+
+
+def _statement_dict(job: StatementJob, db: Session, details: bool = False):
+    result = {'id': job.id, 'status': job.status, 'file_count': job.file_count,
+              'completed_pages': job.completed_pages, 'total_pages': job.total_pages,
+              'last_error': job.last_error, 'created_at': job.created_at}
+    if details and job.result_encrypted:
+        result.update(_statement_result(job))
+        imported = {i.candidate_id: i.expense_id for i in db.scalars(select(StatementImport).where(StatementImport.job_id == job.id))}
+        existing = list(db.scalars(select(Expense).where(Expense.created_by == job.user_id)))
+        for candidate in result.get('candidates', []):
+            candidate['imported_expense_id'] = imported.get(candidate['id'])
+            candidate['existing_matches'] = [{'id': x.id, 'name': x.name} for x in existing
+                if (x.entry_type or 'expense') == candidate['entry_type'] and x.currency == candidate['currency']
+                and (normalized(x.name) == normalized(candidate['name'])
+                     or (x.provider and normalized(x.provider) == normalized(candidate['provider']))) ]
+    return result
+
+
+def _statement_progress(job_id: str, user_id: int, pages: int = 0, total: int | None = None):
+    with SessionLocal() as db:
+        job = db.get(StatementJob, job_id)
+        if not job or job.user_id != user_id or job.status != 'running':
+            raise StatementError('Analysis cancelled.')
+        job.completed_pages += pages
+        if total is not None:
+            job.total_pages = total
+        db.commit()
+
+
+async def _run_statement_job(job_id: str, user_id: int, documents: list[tuple[str, bytes]], profile: dict, account_id: int | None):
+    transactions, warnings, rejected, page_count = [], [], 0, 0
+    try:
+        prepared = []
+        seen = set()
+        for index, (name, raw) in enumerate(documents):
+            digest = hashlib.sha256(raw).hexdigest()
+            if digest in seen:
+                warnings.append(f'{name}: identical upload ignored.')
+                continue
+            seen.add(digest)
+            # Whole-file parsing is performed off the event loop and PDFs are serialized.
+            pages = await run_in_threadpool(document_pages, name, raw)
+            page_count += len(pages)
+            if page_count > MAX_PAGES:
+                raise StatementError('Maximum 40 pages per analysis. Split the documents into smaller analyses.')
+            # Prefix disambiguates two different files with identical names.
+            prepared.append((f'{index + 1}. {name}', pages))
+        _statement_progress(job_id, user_id, total=page_count)
+        for source, pages in prepared:
+            _statement_progress(job_id, user_id)
+            extracted, skipped = await extract_transactions(profile, pages, source,
+                lambda count: _statement_progress(job_id, user_id, pages=count))
+            transactions.extend(extracted)
+            rejected += skipped
+            if len(transactions) > MAX_TRANSACTIONS:
+                raise StatementError('Too many transactions. Split the documents into smaller analyses.')
+        result = build_candidates(transactions)
+        result.update({'warnings': warnings, 'rejected_transactions': rejected, 'account_id': account_id})
+        if rejected:
+            result['warnings'].append(f'{rejected} rows with invalid or unverifiable fields were excluded. Check your statements.')
+        if not transactions:
+            result['warnings'].append('No readable transactions found. Check the statement format and model image capability.')
+        with SessionLocal() as db:
+            job = db.get(StatementJob, job_id)
+            if job and job.user_id == user_id and job.status == 'running':
+                job.result_encrypted = encrypt_secret(json.dumps(result, ensure_ascii=False))
+                job.status = 'ready'
+                db.commit()
+    except Exception as exc:
+        # Do not store bank text, response bodies, credentials or request URLs in errors.
+        if isinstance(exc, StatementError):
+            error = str(exc)
+        elif isinstance(exc, httpx.HTTPStatusError):
+            error = f'AI provider rejected the request (HTTP {exc.response.status_code}). Check model image support, output limit and profile settings.'
+        elif isinstance(exc, httpx.TimeoutException):
+            error = 'AI provider timed out. Try fewer pages or a faster model.'
+        elif isinstance(exc, RuntimeError):
+            error = 'AI returned an empty or incomplete response. Try fewer pages or a model with sufficient output and image support.'
+        else:
+            error = 'Document analysis failed. Check the files and AI profile, then try again.'
+        with SessionLocal() as db:
+            job = db.get(StatementJob, job_id)
+            if job and job.user_id == user_id and job.status == 'running':
+                job.status = 'error'; job.last_error = error[:500]; db.commit()
+    finally:
+        documents.clear()  # Raw uploads are never persisted by PenguCost.
+
+
+@app.get('/api/ai/statements')
+def statement_jobs(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [_statement_dict(j, db) for j in db.scalars(select(StatementJob).where(StatementJob.user_id == user.id).order_by(StatementJob.created_at.desc()).limit(50))]
+
+
+@app.post('/api/ai/statements', status_code=202)
+async def analyze_statements(background_tasks: BackgroundTasks, files: list[UploadFile] = File(...),
+        profile_id: int = Form(...), account_id: int | None = Form(None), consent: bool = Form(False),
+        user: User = Depends(current_user), db: Session = Depends(get_db)):
+    documents = []
+    try:
+        if not consent:
+            raise HTTPException(400, 'Confirm sending statement data to the selected AI profile.')
+        if not 1 <= len(files) <= MAX_FILES:
+            raise HTTPException(400, 'Upload between 1 and 10 files.')
+        validate_catalog_access(db, user, None, account_id)
+        profile = db.get(AIProfile, profile_id)
+        if not profile or not profile.enabled:
+            raise HTTPException(400, 'Select an enabled AI profile.')
+        config = {'provider': profile.provider, 'base_url': profile.base_url,
+                  'api_key': decrypt_secret(profile.api_key), 'model': profile.model, 'statement_max_tokens': profile.statement_max_tokens}
+        total = 0
+        for file in files:
+            raw = await file.read(MAX_BYTES + 1)
+            total += len(raw)
+            if total > MAX_BYTES:
+                raise HTTPException(413, 'Maximum total upload size is 20 MB.')
+            name = (file.filename or '').replace('\\', '/').rsplit('/', 1)[-1][:180]
+            try:
+                document_kind(name, raw)
+            except StatementError as exc:
+                raise HTTPException(400, str(exc))
+            documents.append((name, raw))
+        with _STATEMENT_ADMISSION_LOCK:
+            if db.scalar(select(StatementJob.id).where(StatementJob.user_id == user.id, StatementJob.status == 'running')):
+                raise HTTPException(409, 'You already have a running statement analysis.')
+            if (db.scalar(select(func.count(StatementJob.id)).where(StatementJob.status == 'running')) or 0) >= 2:
+                raise HTTPException(429, 'Two statement analyses are running. Please try again later.')
+            job = StatementJob(id=str(uuid.uuid4()), user_id=user.id, file_count=len(documents))
+            db.add(job); db.commit(); db.refresh(job)
+        background_tasks.add_task(_run_statement_job, job.id, user.id, documents, config, account_id)
+        return _statement_dict(job, db)
+    finally:
+        for file in files:
+            await file.close()
+
+
+@app.get('/api/ai/statements/{job_id}')
+def statement_job(job_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _statement_dict(_owned_statement(db, user.id, job_id), db, details=True)
+
+
+@app.delete('/api/ai/statements/{job_id}')
+def delete_statement_job(job_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    job = _owned_statement(db, user.id, job_id)
+    db.execute(delete(StatementImport).where(StatementImport.job_id == job.id))
+    db.delete(job); db.commit()
+    return {'ok': True}
+
+
+@app.post('/api/ai/statements/{job_id}/candidates/{candidate_id}/import')
+def import_statement_candidate(job_id: str, candidate_id: str, data: ExpenseIn,
+        background_tasks: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    job = _owned_statement(db, user.id, job_id)
+    if data.currency != 'EUR':
+        raise HTTPException(400, 'The dashboard uses EUR. Convert non-EUR statement amounts manually before importing.')
+    if job.status != 'ready':
+        raise HTTPException(409, 'Statement analysis is not ready.')
+    candidate = next((c for c in _statement_result(job).get('candidates', []) if c['id'] == candidate_id), None)
+    if not candidate:
+        raise HTTPException(404, 'Candidate not found')
+    imported = db.scalar(select(StatementImport).where(StatementImport.job_id == job_id, StatementImport.candidate_id == candidate_id))
+    if imported:
+        raise HTTPException(409, 'This candidate has already been imported. Edit the existing entry instead.')
+    validate_catalog_access(db, user, data.category_id, data.account_id)
+    x = Expense(**normalized_expense_data(data), created_by=user.id)
+    try:
+        db.add(x); db.flush()
+        db.add(ExpensePrice(expense_id=x.id, amount=data.amount, valid_from=data.price_effective_from or data.start_date or date.today()))
+        db.add(StatementImport(job_id=job_id, candidate_id=candidate_id, expense_id=x.id))
+        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='statement_import', changes_json='{}'))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Candidate already imported. Refresh the results.')
+    db.refresh(x)
+    _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
+    return expense_dict(x)
+
+
 PROVIDER_ICON_DIR.mkdir(parents=True, exist_ok=True)
 app.mount('/provider-icons', StaticFiles(directory=PROVIDER_ICON_DIR), name='provider-icons')
 
@@ -1868,6 +2132,6 @@ if STATIC_DIR.exists():
     @app.get('/{full_path:path}')
     def spa(full_path: str):
         candidate = STATIC_DIR / full_path
-        if full_path and candidate.is_file():
+        if full_path and candidate.resolve().is_relative_to(STATIC_DIR.resolve()) and candidate.is_file():
             return FileResponse(candidate)
         return FileResponse(STATIC_DIR / 'index.html')

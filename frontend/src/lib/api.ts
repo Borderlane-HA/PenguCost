@@ -4,15 +4,17 @@ export type Account={id:number;name:string;kind:string;note:string;scope:'global
 export type Category={id:number;name:string;icon:string;color:string;scope:'global'|'private';created_by:number|null;can_edit:boolean}
 export type User={id:number;username:string;display_name:string;role:string;is_active?:boolean;version?:string}
 export type AIProvider={id:string;label:string;default_base_url:string;key_optional:boolean}
-export type AIProfile={id:number;name:string;provider:string;provider_label:string;model:string;enabled:boolean;base_url?:string;has_api_key?:boolean}
+export type AIProfile={id:number;name:string;provider:string;provider_label:string;model:string;enabled:boolean;base_url?:string;has_api_key?:boolean;statement_max_tokens?:number}
 export type AIMessage={id:number;role:'user'|'assistant';content:string;created_at:string}
 export type AIConversation={id:number;profile_id:number|null;title:string;mode:'analysis'|'savings'|'chat';target_savings:number|null;selected_expense_ids:number[];status:'idle'|'running'|'error';last_error:string;created_at:string;updated_at:string;messages?:AIMessage[]}
 export type AIBrain={summary:string;updated_at:string|null}
 export type UserPreferences={language:'de'|'en';ai_prompt:string;theme:string}
 
 export async function api<T=any>(url:string,options:RequestInit={}):Promise<T>{
- const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json',...(options.headers||{})},...options})
- if(!r.ok){let m=`HTTP ${r.status}`;try{const j=await r.json();m=j.detail||m}catch{};throw new Error(m)}
+ const headers=new Headers(options.headers);
+ if(!(options.body instanceof FormData)&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
+ const r=await fetch(url,{...options,credentials:'include',headers})
+ if(!r.ok){let m=`HTTP ${r.status}`;try{const j=await r.json();if(typeof j.detail==='string')m=j.detail;else if(Array.isArray(j.detail))m=j.detail.map((x:any)=>`${x.loc?.slice(1).join('.')||'Input'}: ${x.msg}`).join('; ')}catch{};throw new Error(m)}
  return r.status===204?undefined as T:await r.json()
 }
 const locale=()=>document.documentElement.lang==='en'?'en-GB':'de-DE';

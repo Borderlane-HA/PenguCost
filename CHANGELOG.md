@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+- Add a bank statement assistant for multiple PDF/JPG/PNG uploads with recurring debit and income detection, transaction counts, amounts, cadence, confidence and source evidence.
+- Add reviewed one-at-a-time or sequential import into the normal finance editor, existing-entry warnings and atomic duplicate-import protection.
+- Add a configurable statement output-token limit per AI profile (default 8,000), preserved across upgrades and JSON export/restore.
+- Support text PDFs with text models and scans/photos with image-capable OpenAI-compatible/Claude profiles; validate and bound documents and AI output.
+- Keep original uploads ephemeral, store results encrypted, isolate jobs per user and allow deleting/cancelling analyses without deleting imported entries.
+- Recover interrupted chat/document jobs after server restart and block data restore during active analyses.
+- Fix future-start reporting, preset billing normalization, input/link validation, local editor dates, multipart headers, save-error feedback and Graphite primary-button contrast.
+- Validate JSON financial imports, invalidate sessions on full JSON restore, clean stale reminder/history rows and handle corrupt password hashes safely.
+- Harden backup filenames/permissions and validate archive/database/keys before restore; stage files and roll back replacement failures.
+- Pin frontend dependencies with a lockfile and npm ci; add backend regression tests to CI and document project review findings.
+
 ## 0.4.11
 
 - Improve readability of the **Income & Expenses** table with subtle alternating row backgrounds (zebra striping).

@@ -1,0 +1,105 @@
+# Bank statement assistant — 0.5.0
+
+## Workflow
+
+1. Open **AI Agent → Bank statements**.
+2. Upload PDF, JPG/JPEG or PNG files covering several months of one account.
+3. Select the AI profile and optionally the account to assign to new entries.
+4. Confirm sending statement contents to this profile, then start analysis.
+5. Review the results: counterparty, count, dates, amounts, cadence and evidence.
+6. Import one result or select several for sequential review in the ordinary editor.
+7. Confirm amount, currency, direction and interval, then save each entry.
+
+An analysis can run in the background while you navigate elsewhere. Reopen it in
+the analysis list. Delete it to discard encrypted results or cancel running work;
+previously imported finance entries remain. Cancelling prevents further requests
+but cannot retract a request already received by the selected AI provider.
+
+## What a count means
+
+**Netflix 4×** means four extracted bookings for that party/account/reference,
+not four simultaneous subscriptions or four times the proposed recurring amount.
+Separate policy/contract references, accounts, currencies and income/expense
+directions produce separate candidates. **HUK24 8×** can therefore be multiple
+policies when policy references differ. A candidate requires two occurrences.
+Single occurrences are counted in the summary but are not recurring suggestions.
+
+Monthly, quarterly, half-yearly and yearly intervals are determined from observed
+date gaps. Month-end/leap-year shifts are allowed. Missing months, weekly payments,
+multiple same-day bookings and irregular purchases are marked as uncertain.
+Even a regular pattern does not prove a subscription or ongoing contract.
+
+The latest observed amount is proposed. Different historical amounts are shown
+but do not create historical price periods automatically. New entries start today
+by default to avoid applying the latest price retrospectively. You can change the
+start/date/interval in the editor. Contract end and notice periods stay empty.
+Non-EUR transactions retain their original currency in results; manually convert
+the amount to EUR and change the draft currency before import. There is no FX API.
+
+## Processing and limits
+
+- Up to 10 files, 20 MB combined, 40 pages and 2,000 extracted transactions.
+- One running job per user, two running jobs per installation (single worker).
+- PDFium locally extracts text from text PDFs. Sparse/scanned pages and photos
+  are re-encoded as JPEG at up to 2,200 pixels per edge; images are capped at
+  25 megapixels. Password-protected PDFs must be unlocked first.
+- AI calls process up to two pages and use the profile’s configurable output limit (default 8,000 tokens; configure in Settings → AI profiles).
+  Text PDFs can use a text model; scan/photo analysis needs image support.
+- Model output must be complete JSON. Dates, amounts, directions, currencies and
+  page references are validated. Text-PDF evidence must occur on its source page.
+  Invalid rows are excluded with a warning; invalid/truncated replies fail the job.
+- Exact duplicate uploads are skipped. Overlapping transactions are deduplicated
+  by date, normalized party/reference/account, amount, currency and direction.
+  Same-day identical payments on one page retain their multiplicity. Identical
+  payments spread across separate pages can remain ambiguous and need review.
+
+Models can miss rows, split the same merchant under different names or read a
+scan incorrectly. Counts are extracted evidence, not a guarantee of completeness.
+Useful input includes full booking dates/year, counterparty, amount, debit/credit
+columns and account identifiers. Clear, complete statements work best.
+
+## Privacy and persistence
+
+Original uploads are only temporary (multipart parsing may use temporary files);
+PenguCost does not retain them in its data volume. Analysis results are encrypted
+using `/data/.fernet_key`. Normal endpoints only expose the authenticated user's
+jobs and candidates, including for administrators. API responses use `no-store`.
+
+External providers receive the extracted text or image pages after confirmation.
+The provider may apply its own retention policy. Local Ollama profiles allow
+local processing if the configured model supports the required input.
+
+Completed results persist until deletion. Running jobs are marked interrupted
+after restart because source bytes are intentionally not retained. There is no
+automatic job retry that resends bank contents. Errors exclude provider response
+bodies, keys and URLs. Restore/import blocks while relevant AI jobs are running.
+
+User/admin JSON exports omit statement results; imported entries are included as
+normal entries. Volume backups include results and the encryption key. A user
+JSON import replaces that user's statements/results alongside their other data.
+Full administrator JSON restore clears all statements/results. Existing browser
+sessions are invalidated after a full administrator JSON restore.
+
+## API
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | `/api/ai/statements` | Multipart `files`, `profile_id`, optional `account_id`, `consent=true`; returns 202 |
+| GET | `/api/ai/statements` | Current user's latest 50 analysis jobs |
+| GET | `/api/ai/statements/{job_id}` | Status/progress, decrypted results, existing-entry matches and imported flags |
+| DELETE | `/api/ai/statements/{job_id}` | Cancel/delete analysis; keep imported entries |
+| POST | `/api/ai/statements/{job_id}/candidates/{candidate_id}/import` | Reviewed `ExpenseIn` payload; atomic creation with a unique import guard |
+
+## Upgrade
+
+Replace the changed files or use the full source package and rebuild:
+
+```bash
+docker compose up -d --build
+```
+
+New tables are created automatically without changing existing entry IDs or
+price periods. `frontend/package-lock.json` pins the tested dependency graph;
+Docker uses `npm ci`. Existing Docker volumes and encryption keys are retained.
+The source ZIP is not the offline Docker image bundle: initial builds need
+package downloads. Runtime with a local AI endpoint needs no external AI service.

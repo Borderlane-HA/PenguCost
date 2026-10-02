@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.4.11
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.5.0
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards. It also cleans stale Docker build cache before the build and checks that enough free disk space is available. If an older small LXC runs out of space, enlarge it on the Proxmox host, for example with `pct resize <VMID> rootfs +8G`. The update helper is source-controlled and refreshes itself after successful updates.
@@ -172,6 +172,7 @@ docker ps --filter name=pengucost
 - optional provider/brand icons with provider-website fallback, checked on save and refreshed every 24 hours when enabled
 - German and English UI
 - multiple themes
+- **Bank statement assistant**: PDF/JPG/PNG uploads, repeated debit/income detection with counts and evidence, manual review and sequential import
 - persistent **PenguCost AI Agent** with chat history, Brain memory and admin-managed AI profiles
 - Ollama, OpenAI, Grok/xAI, Gemini, IONOS AI Model Hub, Claude and custom compatible endpoints
 
@@ -202,3 +203,51 @@ See also:
 ## License
 
 See [`LICENSE`](LICENSE).
+
+
+## Bank statement assistant (0.5.0)
+
+Open **AI Agent → Bank statements / Kontoauszüge**. Upload multiple statements
+from the same account (ideally 3–12 months), select an enabled AI profile and the
+account for new entries, then confirm processing by that profile.
+
+The assistant shows repeated counterparties such as **Netflix 4×** or **HUK24
+8×**, the latest/minimum/maximum amount, the observed date range, suggested
+monthly/quarterly/half-yearly/yearly cadence, confidence and each source page.
+Counts represent actual extracted transactions, not a multiplier for the entry
+amount. A suggestion needs at least two occurrences. Irregular repeat purchases
+are marked for manual review rather than treated as proven subscriptions.
+
+Choose **Review & import** for one suggestion, or select several and review them
+one by one. The ordinary entry editor is prefilled; correct the amount, income
+or expense direction, currency, billing interval, category, account and dates.
+Confirm the review before saving. Nothing is created just by uploading. Possible
+existing entries are shown; importing the same candidate twice is blocked.
+
+Limits: **10 files, 20 MB total, 40 pages** per analysis, one running analysis
+per user and two globally. Text PDFs use local text extraction and can be analyzed
+by text-only models. Photos/scanned PDFs are converted to bounded JPEG pages and
+require an image-capable model at the selected provider. Claude's image format
+and OpenAI-compatible endpoints are supported; actual compatibility and output
+capacity depend on your selected model. Each model request processes at most two
+pages and uses the profile’s configurable output limit (default 8,000 tokens). Use fewer pages or another model
+if the provider rejects this limit or returns incomplete output.
+
+Raw uploads are temporary and never written into the PenguCost data volume.
+Results are encrypted with the installation's existing Fernet key and isolated
+per user. External providers receive the statement content after confirmation;
+their own retention rules apply. Results remain until you delete the analysis;
+deleting it also cancels pending work, but keeps imported finance entries.
+Completed results survive application restarts; running analyses must be
+uploaded again. User/admin JSON exports intentionally omit statement results;
+volume backups include the encrypted results and matching encryption key.
+
+The proposed amount is the **latest observed amount**, never the sum of all
+occurrences. A new draft starts today so a later observed price is not applied
+retrospectively to the whole observed period. Statement dates do not establish
+contract dates or cancellation terms. The dashboard has no foreign-exchange
+conversion; manually convert non-EUR proposals to EUR and change their draft currency
+before import. The statement importer blocks unconverted non-EUR entries.
+
+Details and review findings: [Statement assistant](docs/STATEMENT-ASSISTANT.md),
+[Project review](docs/PROJECT-REVIEW-0.5.0.md).
