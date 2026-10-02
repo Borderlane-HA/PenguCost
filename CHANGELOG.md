@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+- Ollama bank statements now use native `/api/chat` requests with an explicit context setting (default 32,768 tokens), `num_predict: -1` in Automatic mode, JSON output and thinking disabled. Normal chat/provider paths remain unchanged.
+- Process Ollama statements one page per request to reduce input/output size and advance completed-page progress per page.
+- Store and export/restore the new statement context setting; existing profiles receive the default during upgrade. A context of 0 uses the server default.
+- Fix a polling race that could update the history to failed/ready while leaving the selected result panel stuck on running. Display failures immediately in the result panel.
+- Include only safe numeric request/token counts in native Ollama truncation errors for troubleshooting.
+- Start the login and first-user setup username field empty instead of prefilled with admin.
+
 ## 0.5.1
 
 - Added Automatic / no fixed output limit for Ollama bank statement analysis; this is the default for new Ollama profiles. Manual limits remain available.

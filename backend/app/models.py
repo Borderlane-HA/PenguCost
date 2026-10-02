@@ -128,6 +128,7 @@ class AIProfile(Base):
     model: Mapped[str] = mapped_column(String(200), default='')
     api_key: Mapped[str] = mapped_column(Text, default='')
     statement_max_tokens: Mapped[int] = mapped_column(Integer, default=8000)
+    statement_context_tokens: Mapped[int] = mapped_column(Integer, default=32768)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

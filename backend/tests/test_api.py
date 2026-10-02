@@ -219,19 +219,38 @@ def test_upgrade_adds_profile_limit_without_losing_existing_data(client):
 
 def test_ollama_automatic_output_roundtrips_through_export_restore(client,monkeypatch):
     p=profile(client)
+    assert client.put(f'/api/settings/ai/profiles/{p}',json={'statement_context_tokens':65536}).status_code==200
     assert client.get('/api/settings/ai/profiles').json()[0]['statement_max_tokens']==0
     model=AsyncMock(return_value=json.dumps(model_rows()))
     monkeypatch.setattr(statements,'_call_model',model)
     assert upload(client,p).status_code==202
     assert model.call_args.kwargs['max_tokens']==0
+    assert model.call_args.kwargs['ollama_context_tokens']==65536
     exported=client.get('/api/export/admin').json()
     assert exported['ai_profiles'][0]['statement_max_tokens']==0
+    assert exported['ai_profiles'][0]['statement_context_tokens']==65536
     response=client.post('/api/import/admin',json=exported)
     assert response.status_code==200
     # Restore invalidates browser sessions; verify stored data directly.
     from app.models import AIProfile
     with SessionLocal() as db:
         assert db.get(AIProfile,p).statement_max_tokens==0
+        assert db.get(AIProfile,p).statement_context_tokens==65536
+
+
+def test_upgrade_adds_context_setting_without_changing_profile_or_expense(client):
+    from sqlalchemy import text
+    from app.models import AIProfile
+    p=profile(client)
+    assert client.put(f'/api/settings/ai/profiles/{p}',json={'statement_max_tokens':24000}).status_code==200
+    expense=client.post('/api/expenses',json={'name':'Existing contract','amount':42}).json()
+    with engine.begin() as connection:
+        connection.execute(text('ALTER TABLE ai_profiles DROP COLUMN statement_context_tokens'))
+    engine.dispose();main.migrate_schema()
+    with SessionLocal() as db:
+        assert db.get(AIProfile,p).statement_context_tokens==32768
+        assert db.get(AIProfile,p).statement_max_tokens==24000
+        assert db.get(Expense,expense['id']).amount==42
 
 
 def test_ollama_default_migration_is_once_only_and_preserves_custom_limits(client):

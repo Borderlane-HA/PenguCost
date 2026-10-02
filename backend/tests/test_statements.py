@@ -166,3 +166,80 @@ def test_precise_response_errors_exclude_provider_content(monkeypatch,data,reaso
         asyncio.run(ai._call_model('ollama','https://model.test/v1','','model','system',[{'role':'user','content':'test'}],max_tokens=0,require_complete=True))
     assert exc.value.reason == reason
     assert 'PRIVATE BANK DATA' not in str(exc.value)
+
+
+@pytest.mark.parametrize('base', ['https://model.test/v1','https://model.test/v1/chat/completions','https://model.test/api/chat','https://model.test'])
+def test_native_ollama_statement_context_and_image_mapping(monkeypatch,base):
+    import asyncio
+    import httpx
+    from app import ai
+    original = httpx.AsyncClient
+    def handler(request):
+        assert str(request.url) == 'https://model.test/api/chat'
+        body=json.loads(request.content)
+        assert body['options']=={'temperature':0.2,'num_predict':-1,'num_ctx':32768}
+        assert body['stream'] is False and body['think'] is False and body['format']=='json'
+        assert body['messages']==[{'role':'system','content':'system'}, {'role':'user','content':'PAGE 1\nstatement text','images':['YQ==']}]
+        return httpx.Response(200,json={'done':True,'done_reason':'stop','message':{'content':'{"transactions":[]}'}})
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(handler),trust_env=False,**kwargs))
+    messages=[{'role':'user','content':[{'type':'text','text':'PAGE 1'},{'type':'text','text':'statement text'},{'type':'image_url','image_url':{'url':'data:image/jpeg;base64,YQ=='}}]}]
+    assert asyncio.run(ai._call_model('ollama',base,'','test','system',messages,0,True,32768))=='{"transactions":[]}'
+
+
+def test_native_ollama_manual_cap_and_server_context_default(monkeypatch):
+    import asyncio
+    import httpx
+    from app import ai
+    original=httpx.AsyncClient
+    def handler(request):
+        assert json.loads(request.content)['options']=={'temperature':0.2,'num_predict':24000}
+        return httpx.Response(200,json={'done':True,'done_reason':'stop','message':{'content':'{"transactions":[]}'}})
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(handler),trust_env=False,**kwargs))
+    asyncio.run(ai._call_model('ollama','https://model.test/ollama/v1','','test','system',[{'role':'user','content':'test'}],24000,True,0))
+    assert ai._ollama_chat_url('https://model.test/ollama/v1')=='https://model.test/ollama/api/chat'
+
+
+def test_native_ollama_truncation_reports_only_safe_counts(monkeypatch):
+    import asyncio
+    import httpx
+    from app import ai
+    original=httpx.AsyncClient
+    data={'done':True,'done_reason':'length','prompt_eval_count':2048,'eval_count':10,'message':{'content':'PRIVATE BANK DATA','thinking':'SECRET'}}
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(lambda r:httpx.Response(200,json=data)),trust_env=False,**kwargs))
+    with pytest.raises(ai.AIResponseError) as exc:
+        asyncio.run(ai._call_model('ollama','https://model.test/v1','','test','system',[{'role':'user','content':'test'}],0,True,32768))
+    assert 'requested_context=32768' in str(exc.value)
+    assert 'prompt_eval_count=2048' in str(exc.value) and 'eval_count=10' in str(exc.value)
+    assert 'PRIVATE' not in str(exc.value) and 'SECRET' not in str(exc.value)
+
+
+@pytest.mark.parametrize('data,reason', [
+    ({'done':False,'message':{'content':'{"transactions":[]}'}},'incomplete'),
+    ({'done':True,'message':{'content':'','thinking':'SECRET'}},'thinking_only'),
+    ({'done':True,'message':{'content':''}},'empty'),
+])
+def test_native_ollama_failure_states(monkeypatch,data,reason):
+    import asyncio
+    import httpx
+    from app import ai
+    original=httpx.AsyncClient
+    monkeypatch.setattr(ai.httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(lambda r:httpx.Response(200,json=data)),trust_env=False,**kwargs))
+    with pytest.raises(ai.AIResponseError) as exc:
+        asyncio.run(ai._call_model('ollama','https://model.test/v1','','test','system',[{'role':'user','content':'test'}],0,True,32768))
+    assert exc.value.reason==reason and 'SECRET' not in str(exc.value)
+
+
+def test_ollama_statement_batches_each_page_and_passes_context(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app import statements
+    calls=AsyncMock(return_value='{"transactions":[]}')
+    monkeypatch.setattr(statements,'_call_model',calls)
+    progress=[]
+    profile={'provider':'ollama','base_url':'http://model.test/v1','api_key':'','model':'test','statement_max_tokens':0,'statement_context_tokens':65536}
+    pages=[{'page':n,'text':f'PAGE CONTENT {n}'} for n in range(1,5)]
+    assert asyncio.run(statements.extract_transactions(profile,pages,'test.pdf',progress.append))==([],0)
+    assert progress==[1,1,1,1] and calls.await_count==4
+    for n,call in enumerate(calls.await_args_list,1):
+        assert call.kwargs['ollama_context_tokens']==65536 and call.kwargs['max_tokens']==0
+        assert f'PAGE {n}\n' in call.kwargs['messages'][0]['content']

@@ -13,6 +13,7 @@ class AIResponseError(RuntimeError):
             'thinking_only': 'AI provider returned reasoning but no final answer. Check the model thinking settings and available context window.',
             'truncated': 'AI response was cut off (token/context limit). For Ollama, use Automatic output and check its context window; otherwise increase the output limit or use fewer pages.',
             'filtered': 'AI provider stopped the response with content_filter. Check the provider or model policy.',
+            'incomplete': 'Ollama returned an unfinished response. Check the model/server configuration.',
         }
         self.reason = reason
         super().__init__(messages[reason])
@@ -84,9 +85,75 @@ def _anthropic_content(content):
     return blocks
 
 
-async def _call_model(provider: str, base_url: str, api_key: str, model: str, system: str, messages: list[dict], max_tokens: int = 3200, require_complete: bool = False) -> str:
+def _ollama_chat_url(base_url: str) -> str:
+    base = base_url.rstrip('/')
+    if not base:
+        raise RuntimeError('Base URL is missing for this AI profile')
+    for suffix in ('/v1/chat/completions', '/api/chat', '/chat/completions', '/v1'):
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    return base + '/api/chat'
+
+
+def _ollama_messages(messages: list[dict]) -> list[dict]:
+    """Keep all text and inline page images together in their original user turn."""
+    result = []
+    for message in messages:
+        content = message['content']
+        if isinstance(content, str):
+            result.append(dict(message))
+            continue
+        text, images = [], []
+        for block in content:
+            if block.get('type') == 'text':
+                text.append(block['text'])
+            elif block.get('type') == 'image_url':
+                url = block['image_url']['url']
+                if not url.startswith('data:image/') or ';base64,' not in url:
+                    raise RuntimeError('Only inline document images are supported')
+                images.append(url.split(';base64,', 1)[1])
+        converted = {'role': message['role'], 'content': '\n'.join(text)}
+        if images:
+            converted['images'] = images
+        result.append(converted)
+    return result
+
+
+async def _call_model(provider: str, base_url: str, api_key: str, model: str, system: str, messages: list[dict], max_tokens: int = 3200, require_complete: bool = False, ollama_context_tokens: int | None = None) -> str:
     url, anthropic = _url(provider, base_url)
     timeout = httpx.Timeout(1800.0 if require_complete else 600.0, connect=30.0)
+    if provider == 'ollama' and ollama_context_tokens is not None:
+        options = {'temperature': 0.2, 'num_predict': max_tokens or -1}
+        if ollama_context_tokens:
+            options['num_ctx'] = ollama_context_tokens
+        body = {'model': model, 'stream': False, 'format': 'json', 'think': False,
+                'options': options,
+                'messages': _ollama_messages([{'role': 'system', 'content': system}, *messages])}
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(_ollama_chat_url(base_url), json=body, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        if require_complete and data.get('done_reason') == 'length':
+            error = AIResponseError('truncated')
+            # Whitelisted numeric diagnostics only; never store model text/reasoning.
+            counts = ', '.join(f'{key}={data[key]}' for key in ('prompt_eval_count', 'eval_count')
+                               if type(data.get(key)) is int and 0 <= data[key] <= 2**31)
+            detail = f'requested_context={ollama_context_tokens or "server default"}'
+            error.args = (f'Ollama stopped with done_reason=length; {detail}'
+                          + (f', {counts}' if counts else '')
+                          + '. Increase the statement context setting or check the model/server limits.',)
+            raise error
+        if require_complete and data.get('done') is not True:
+            raise AIResponseError('incomplete')
+        message = data.get('message') or {}
+        content = message.get('content')
+        if not isinstance(content, str) or not content.strip():
+            raise AIResponseError('thinking_only' if message.get('thinking') else 'empty')
+        return content.strip()
     if anthropic:
         body = {
             'model': model,

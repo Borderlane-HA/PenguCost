@@ -1,4 +1,4 @@
-# Bank statement assistant — 0.5.1
+# Bank statement assistant — 0.5.2
 
 ## Workflow
 
@@ -10,6 +10,8 @@
 6. Import one result or select several for sequential review in the ordinary editor.
 7. Confirm amount, currency, direction and interval, then save each entry.
 
+The counter advances when a page/request has finished extraction; it is not a
+live token counter. Ready/error states update the selected panel automatically.
 An analysis can run in the background while you navigate elsewhere. Reopen it in
 the analysis list. Delete it to discard encrypted results or cancel running work;
 previously imported finance entries remain. Cancelling prevents further requests
@@ -43,20 +45,25 @@ the amount to EUR and change the draft currency before import. There is no FX AP
 - PDFium locally extracts text from text PDFs. Sparse/scanned pages and photos
   are re-encoded as JPEG at up to 2,200 pixels per edge; images are capped at
   25 megapixels. Password-protected PDFs must be unlocked first.
-- AI calls process up to two pages. Ollama defaults to **Automatic / no fixed
-  output limit**, stored as `statement_max_tokens: 0`. PenguCost sends
-  `max_tokens: -1` to Ollama's OpenAI-compatible endpoint, which Ollama 0.34.4
-  maps directly to `num_predict: -1`. Manual limits remain available in Settings.
-  Other providers retain their 8,000-token default. Automatic does not enlarge
-  the model context window or override server/runtime limitations.
-  Text PDFs can use a text model; scan/photo analysis needs image support.
+- Ollama processes one page per native `/api/chat` request. Automatic output
+  (`statement_max_tokens: 0`) sends `options.num_predict: -1`; a manual limit
+  remains available. `statement_context_tokens` defaults to 32,768 and is sent
+  as `options.num_ctx`. Set 0 to use the Ollama server/model context default.
+  JSON output is enabled and thinking is disabled for transaction extraction.
+  These statement settings do not change normal AI chat requests.
+- Other providers still process up to two pages per request and default to 8,000
+  output tokens. Text PDFs can use a text model; scans/photos need image support.
 - Statement requests allow up to 30 minutes of read inactivity per call (connection
   timeout: 30 seconds). An Ollama model still needs enough context for the input,
-  reasoning and final JSON together. The OpenAI-compatible request does not set
-  `num_ctx`; configure that on the Ollama server or in the model's Modelfile.
+  final JSON. Increasing context requires more memory and remains subject to
+  model/server capacity. Base URLs ending in `/v1` or `/v1/chat/completions` are
+  mapped to `/api/chat` at the same host and proxy prefix; a proxy must expose
+  that native route. HTTP 404 can mean a missing model or an inaccessible route.
 - Empty final answers, reasoning without a final answer, missing response choices,
   token/context truncation and provider filtering have separate privacy-safe error
-  messages. Response bodies and reasoning are not stored or displayed in errors.
+  messages. Native truncation diagnostics include requested context and numeric
+  prompt/output counts when supplied by Ollama; no response content is exposed.
+  Response bodies and reasoning are not stored or displayed in errors.
 - Model output must be complete JSON. Dates, amounts, directions, currencies and
   page references are validated. Text-PDF evidence must occur on its source page.
   Invalid rows are excluded with a warning; invalid/truncated replies fail the job.

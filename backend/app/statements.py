@@ -176,17 +176,20 @@ async def extract_transactions(profile: dict, pages: list[dict], source: str, pr
     transactions, skipped = [], 0
     profile = dict(profile)
     max_tokens = profile.pop('statement_max_tokens', 0 if profile.get('provider') == 'ollama' else 8000)
+    context_tokens = profile.pop('statement_context_tokens', 32768)
+    model_options = {'ollama_context_tokens': context_tokens} if profile.get('provider') == 'ollama' else {}
     # A short statement period header aids year inference across page boundaries.
     header = pages[0].get('text', '')[:1200]
-    for start in range(0, len(pages), 2):
-        batch = pages[start:start + 2]
+    batch_size = 1 if profile.get('provider') == 'ollama' else 2
+    for start in range(0, len(pages), batch_size):
+        batch = pages[start:start + batch_size]
         blocks = [{'type': 'text', 'text': f'Document header (untrusted):\n{header}\nExtract only the following pages.'}]
         for page in batch:
             blocks.append({'type': 'text', 'text': f"PAGE {page['page']}\n{page.get('text', '')}"})
             if page.get('image'):
                 blocks.append({'type': 'image_url', 'image_url': {'url': page['image']}})
         content = blocks if any(p.get('image') for p in batch) else '\n'.join(b['text'] for b in blocks)
-        reply = await _call_model(**profile, system=EXTRACTION_PROMPT, messages=[{'role': 'user', 'content': content}], max_tokens=max_tokens, require_complete=True)
+        reply = await _call_model(**profile, system=EXTRACTION_PROMPT, messages=[{'role': 'user', 'content': content}], max_tokens=max_tokens, require_complete=True, **model_options)
         extracted, rejected = parse_transactions(reply, batch, source)
         transactions.extend(extracted)
         skipped += rejected
