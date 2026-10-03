@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0
+
+- Add dated contract versions, retaining provider, term, account, category, holder, user assignment and cancellation/renewal rules alongside existing price history.
+- Add a save assistant with separate effective dates for prices and terms, a before/after preview and editable cancellation/renewal settings. Scheduled terms are editable/removable without changing current values.
+- Add a year/month/week/day contract calendar with phase bars, period costs, per-entry visibility, open-ended filtering and archived/expired contract management.
+- Prorate recurring costs by actual calendar days; keep renewal calculations anchored to the original month-end boundary and respect explicitly scheduled prices. Historical dashboard totals/categories now use dated terms.
+- Offer archive or permanent deletion for individual and bulk removals. Restoring an archive retains the intervening inactive period.
+- Add bounded history deletion with a retained price/term anchor, and ownership checks on all calendar/history controls. Separate statement analyses, chats and backups remain independently managed.
+- Include contract timelines and archival state in user/admin JSON backups; seed legacy metadata once with an explicit incomplete-history marker.
+
 ## 0.5.4
 
 - Open the bank statement assistant directly from Income & Expenses beside New entry.

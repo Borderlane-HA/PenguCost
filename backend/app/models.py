@@ -77,6 +77,10 @@ class Expense(Base):
     contract_reference: Mapped[str] = mapped_column(String(160), default='')
     tags: Mapped[str] = mapped_column(String(255), default='')
     notes: Mapped[str] = mapped_column(Text, default='')
+    contract_holder: Mapped[str] = mapped_column(String(160), default='')
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    archived_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    history_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -84,6 +88,18 @@ class Expense(Base):
     category = relationship(Category)
     account = relationship(Account)
     prices = relationship('ExpensePrice', back_populates='expense', cascade='all, delete-orphan', order_by='ExpensePrice.valid_from')
+    versions = relationship('ContractVersion', back_populates='expense', cascade='all, delete-orphan', order_by='ContractVersion.effective_from')
+
+
+class ContractVersion(Base):
+    __tablename__ = 'contract_versions'
+    __table_args__ = (UniqueConstraint('expense_id', 'effective_from', name='uq_contract_version_date'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    expense_id: Mapped[int] = mapped_column(ForeignKey('expenses.id'), index=True)
+    effective_from: Mapped[date] = mapped_column(Date, index=True)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expense = relationship(Expense, back_populates='versions')
 
 
 class ExpensePrice(Base):

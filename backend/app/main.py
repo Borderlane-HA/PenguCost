@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from .db import Base, engine, get_db, SessionLocal, DATA_DIR
 from .models import (
     User, Expense, ExpensePrice, Account, Category, Setting, ReminderAction,
-    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange, StatementJob, StatementImport,
+    HiddenCatalogItem, AIProfile, AIConversation, AIMessage, AIBrain, ExpenseChange, StatementJob, StatementImport, ContractVersion,
 )
 from .security import hash_password, verify_password, make_session, session_user_id, encrypt_secret, decrypt_secret
 from .ai import AIResponseError, analyze_costs, chat_finances
@@ -35,7 +35,9 @@ from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, Stat
     document_kind, document_pages, extract_transactions, build_candidates, normalized,
     csv_table, csv_transactions, correct_booking)
 
-APP_VERSION = '0.5.4'
+from . import contracts
+
+APP_VERSION = '0.6.0'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 
@@ -64,6 +66,9 @@ def migrate_schema():
         statements.append("ALTER TABLE expenses ADD COLUMN contract_url VARCHAR(500) DEFAULT ''")
     if 'contract_reference' not in columns:
         statements.append("ALTER TABLE expenses ADD COLUMN contract_reference VARCHAR(160) DEFAULT ''")
+    for name, sql in {'contract_holder':"VARCHAR(160) DEFAULT ''", 'is_archived':'BOOLEAN DEFAULT 0', 'archived_on':'DATE', 'history_from':'DATE'}.items():
+        if name not in columns:
+            statements.append(f'ALTER TABLE expenses ADD COLUMN {name} {sql}')
     if statements:
         with engine.begin() as conn:
             for statement in statements:
@@ -322,6 +327,9 @@ class ExpenseIn(BaseModel):
     tags: str = ''
     notes: str = ''
     price_effective_from: Optional[date] = None
+    update_price: bool = True
+    contract_effective_from: Optional[date] = None
+    contract_holder: str = Field(default='', max_length=160)
 
     @field_validator('name')
     @classmethod
@@ -433,40 +441,21 @@ def add_months(value: date, months: int) -> date:
 
 
 def price_at(x: Expense, when: date) -> float:
-    prices = sorted(x.prices, key=lambda p: p.valid_from)
-    applicable = [p for p in prices if p.valid_from <= when]
-    if applicable:
-        return applicable[-1].amount
-    if prices:
-        return prices[0].amount
-    return x.amount
+    return contracts.amount_at(x, when)
 
 
 def effective_contract_end(x: Expense, today: date) -> date | None:
-    end = x.contract_end
-    if not end or not x.auto_renew or not x.renewal_period_months:
-        return end
-    guard = 0
-    while end < today and guard < 600:
-        end = add_months(end, x.renewal_period_months)
-        guard += 1
-    return end
+    return contracts.end_at(x, today)
 
 
 def is_effectively_active(x: Expense, when: date | None = None) -> bool:
-    when = when or date.today()
-    # A cancelled contract still creates cash flow until its effective end.
-    # Only paused/ended entries are excluded from current reporting.
-    if x.status in {'paused', 'ended'}:
-        return False
-    if x.start_date and x.start_date > when:
-        return False
-    end = effective_contract_end(x, when)
-    return not end or end >= when
+    return contracts.active_at(x, when or date.today())
 
 
 def expense_dict(x: Expense, as_of: date | None = None):
     today = as_of or date.today()
+    source = getattr(x, '_source', x)
+    x = contracts.state_at(x, today)
     current_amount = price_at(x, today)
     months = max(1, x.interval_months or 1) if x.billing_interval == 'custom' else {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}.get(x.billing_interval, 1)
     if (x.recurrence_type or 'recurring') == 'one_time':
@@ -500,6 +489,10 @@ def expense_dict(x: Expense, as_of: date | None = None):
         'contract_url': x.contract_url or '', 'contract_reference': x.contract_reference or '',
         'tags': x.tags, 'notes': x.notes, 'price_history': price_history,
         'next_price_change': ({'amount': upcoming_price.amount, 'valid_from': upcoming_price.valid_from} if upcoming_price else None),
+        'contract_holder': x.contract_holder or '', 'is_archived': x.is_archived, 'archived_on': x.archived_on, 'history_from': x.history_from,
+        'contract_versions': contracts.timeline(source), 'owner_name': getattr(x, 'owner_name', ''),
+        'next_contract_change': next((v for v in contracts.timeline(source) if v['effective_from'] > today.isoformat()), None),
+        'expired': (x.status == 'ended' or (next_end is not None and next_end < today) or (x.recurrence_type == 'one_time' and (x.next_due_date or x.start_date) is not None and (x.next_due_date or x.start_date) < today)),
     }
 
 
@@ -595,6 +588,9 @@ def startup():
     for item in db.scalars(select(Expense)):
         if not item.prices:
             db.add(ExpensePrice(expense_id=item.id, amount=item.amount, valid_from=item.start_date or (item.created_at.date() if item.created_at else date.today())))
+            changed = True
+        if not item.versions:
+            contracts.ensure_history(db, item, assumed=True)
             changed = True
     if changed:
         db.commit()
@@ -808,6 +804,9 @@ def patch_account(item_id: int, data: AccountPatch, user: User = Depends(current
         x.name = value
     if data.kind is not None: x.kind = data.kind[:40]
     if data.note is not None: x.note = data.note[:255]
+    for item in db.scalars(select(Expense)):
+        if contracts.state_at(item,date.today()).account_id == item_id:
+            contracts.write_version(db,item,{},date.today())
     try:
         db.commit()
     except Exception:
@@ -824,14 +823,21 @@ def delete_account(item_id: int, user: User = Depends(current_user), db: Session
         if user.role != 'admin':
             hide_catalog_item(db, user, 'account', item_id); db.commit()
             return {'ok': True, 'hidden_only': True}
-        refs = db.scalar(select(func.count(Expense.id)).where(Expense.account_id == item_id)) or 0
+        refs = [e for e in db.scalars(select(Expense)) if contracts.state_at(e,date.today()).account_id == item_id or any(v.effective_from>date.today() and contracts.version_data(v).get('account_id')==item_id for v in e.versions)]
         if refs:
             raise HTTPException(409, 'Konto wird noch verwendet und kann deshalb nicht global gelöscht werden')
     else:
         if x.created_by != user.id:
             raise HTTPException(403, 'You cannot delete this account')
-        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.account_id == item_id)):
-            expense.account_id = None
+        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id)):
+            if contracts.state_at(expense,date.today()).account_id == item_id:
+                contracts.write_version(db, expense, {'account_id': None}, date.today())
+            for v in expense.versions:
+                if v.effective_from > date.today():
+                    values=json.loads(v.snapshot_json)
+                    if values.get('account_id') == item_id:
+                        values.update(account_id=None, account=None);v.snapshot_json=json.dumps(values,ensure_ascii=False)
+            contracts.sync_latest(expense)
     db.delete(x); db.commit()
     return {'ok': True, 'hidden_only': False}
 
@@ -871,6 +877,9 @@ def patch_category(item_id: int, data: CategoryPatch, user: User = Depends(curre
         x.name = value
     if data.icon is not None: x.icon = data.icon
     if data.color is not None: x.color = _validate_category_color(data.color)
+    for item in db.scalars(select(Expense)):
+        if contracts.state_at(item,date.today()).category_id == item_id:
+            contracts.write_version(db,item,{},date.today())
     try:
         db.commit()
     except Exception:
@@ -887,14 +896,21 @@ def delete_category(item_id: int, user: User = Depends(current_user), db: Sessio
         if user.role != 'admin':
             hide_catalog_item(db, user, 'category', item_id); db.commit()
             return {'ok': True, 'hidden_only': True}
-        refs = db.scalar(select(func.count(Expense.id)).where(Expense.category_id == item_id)) or 0
+        refs = [e for e in db.scalars(select(Expense)) if contracts.state_at(e,date.today()).category_id == item_id or any(v.effective_from>date.today() and contracts.version_data(v).get('category_id')==item_id for v in e.versions)]
         if refs:
             raise HTTPException(409, 'Rubrik wird noch verwendet und kann deshalb nicht global gelöscht werden')
     else:
         if x.created_by != user.id:
             raise HTTPException(403, 'You cannot delete this category')
-        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.category_id == item_id)):
-            expense.category_id = None
+        for expense in db.scalars(select(Expense).where(Expense.created_by == user.id)):
+            if contracts.state_at(expense,date.today()).category_id == item_id:
+                contracts.write_version(db, expense, {'category_id': None}, date.today())
+            for v in expense.versions:
+                if v.effective_from > date.today():
+                    values=json.loads(v.snapshot_json)
+                    if values.get('category_id') == item_id:
+                        values.update(category_id=None, category=None);v.snapshot_json=json.dumps(values,ensure_ascii=False)
+            contracts.sync_latest(expense)
     db.delete(x); db.commit()
     return {'ok': True, 'hidden_only': False}
 
@@ -909,8 +925,8 @@ def reset_hidden_catalog(user: User = Depends(current_user), db: Session = Depen
 
 
 @app.get('/api/expenses')
-def get_expenses(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return [expense_dict(x) for x in db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.name))]
+def get_expenses(include_archived: bool = False, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [expense_dict(x) for x in db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.name)) if include_archived or not x.is_archived]
 
 
 def validate_catalog_access(db: Session, user: User, category_id: int | None, account_id: int | None):
@@ -925,7 +941,7 @@ def validate_catalog_access(db: Session, user: User, category_id: int | None, ac
 
 
 def normalized_expense_data(data: ExpenseIn):
-    payload = data.model_dump(exclude={'price_effective_from'})
+    payload = data.model_dump(exclude={'price_effective_from', 'contract_effective_from', 'update_price'})
     if data.billing_interval != 'custom':
         payload['interval_months'] = {'monthly': 1, 'quarterly': 3, 'halfyearly': 6, 'yearly': 12}[data.billing_interval]
     if not payload.get('contract_end') and payload.get('start_date') and payload.get('minimum_term_months'):
@@ -952,6 +968,7 @@ def add_expense(data: ExpenseIn, background_tasks: BackgroundTasks, user: User =
     db.add(x)
     db.flush()
     db.add(ExpensePrice(expense_id=x.id, amount=initial_amount, valid_from=data.price_effective_from or data.start_date or date.today()))
+    db.flush(); contracts.ensure_history(db, x)
     db.commit()
     db.refresh(x)
     _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
@@ -969,33 +986,42 @@ def update_expense(item_id: int, data: ExpenseIn, background_tasks: BackgroundTa
 
 
 def _apply_expense_update(db: Session, user: User, x: Expense, data: ExpenseIn):
-    """Apply reviewed fields and price history inside the caller's transaction."""
     validate_catalog_access(db, user, data.category_id, data.account_id)
-    old_contract_end = x.contract_end
-    old_cancellation_date = x.cancellation_date
+    contracts.ensure_history(db, x, assumed=True)
+    effective = data.contract_effective_from or date.today()
+    before = expense_dict(x, effective)
     payload = normalized_expense_data(data)
-    if (payload.get('contract_end') != old_contract_end and data.cancellation_date == old_cancellation_date
+    if x.history_from and effective < x.history_from:
+        raise HTTPException(400, 'The effective date is before the retained history.')
+    if (payload.get('contract_end') != before['contract_end'] and data.cancellation_date == before['cancellation_date']
             and payload.get('contract_end') and payload.get('cancellation_notice_days') is not None):
-        payload['cancellation_date'] = payload['contract_end'] - timedelta(days=max(0, payload['cancellation_notice_days']))
-    before = expense_dict(x)
-    requested_amount = payload.pop('amount')
-    effective = data.price_effective_from or date.today()
-    if round(price_at(x, effective), 2) != round(requested_amount, 2):
-        upsert_price(db, x, requested_amount, effective)
-    for k, v in payload.items():
-        setattr(x, k, v)
-    if x.auto_renew and x.cancelled_on is not None:
-        x.cancelled_on = None
+        payload['cancellation_date'] = payload['contract_end'] - timedelta(days=payload['cancellation_notice_days'])
+    requested = payload.pop('amount')
+    price_date = data.price_effective_from or effective
+    if x.history_from and price_date < x.history_from:
+        raise HTTPException(400, 'The price date is before the retained history.')
+    if data.update_price and round(price_at(x, price_date), 2) != round(requested, 2):
+        upsert_price(db, x, requested, price_date)
+    if payload.get('auto_renew'):
+        payload['cancelled_on'] = None
+    changed = {k: {'from': before.get(k), 'to': value} for k, value in payload.items() if before.get(k) != value}
+    if changed:
+        contracts.write_version(db, x, payload, effective)
+        # Columns keep the latest submitted values for export/catalog references;
+        # all temporal reports use the dated versions instead of these columns.
+        contracts.sync_latest(x)
+    if data.update_price and round(before['amount'], 2) != round(requested, 2):
+        changed['amount'] = {'from': before['amount'], 'to': requested}
     x.amount = price_at(x, date.today())
-    after_preview = {**before, **payload, 'amount': requested_amount}
-    changes = {k: {'from': before.get(k), 'to': after_preview.get(k)} for k in after_preview if k in before and before.get(k) != after_preview.get(k)}
-    if changes:
-        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='updated', changes_json=json.dumps(changes, default=str, ensure_ascii=False)))
+    if changed:
+        db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='contract_change', changes_json=json.dumps(
+            {'fields': changed, 'contract_effective_from': effective, 'price_effective_from': price_date}, default=str, ensure_ascii=False)))
 
 
 @app.delete('/api/expenses/{item_id}')
 def delete_expense(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     x = owned_expense(db, user, item_id)
+    db.execute(delete(StatementImport).where(StatementImport.expense_id == x.id))
     db.execute(delete(ExpenseChange).where(ExpenseChange.expense_id == x.id))
     db.execute(delete(ReminderAction).where(ReminderAction.expense_id == x.id))
     db.delete(x)
@@ -1005,7 +1031,7 @@ def delete_expense(item_id: int, user: User = Depends(current_user), db: Session
 
 @app.post('/api/expenses/{item_id}/clone')
 def clone_expense(item_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    source = owned_expense(db, user, item_id)
+    source = contracts.state_at(owned_expense(db, user, item_id), date.today())
     clone = Expense(
         name=((('Copy of ' if language_for(db, user) == 'en' else 'Kopie von ') + source.name))[:160], provider=source.provider, provider_website=source.provider_website, entry_type=(source.entry_type or 'expense'), amount=source.amount, currency=source.currency,
         billing_interval=source.billing_interval, interval_months=source.interval_months,
@@ -1013,7 +1039,7 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
         category_id=source.category_id, account_id=source.account_id, start_date=source.start_date,
         next_due_date=source.next_due_date, contract_end=source.contract_end, cancellation_date=(source.contract_end - timedelta(days=max(0, source.cancellation_notice_days))) if source.contract_end and source.cancellation_notice_days is not None else source.cancellation_date,
         cancellation_notice_days=source.cancellation_notice_days, cancelled_on=None, auto_renew=source.auto_renew,
-        status='active', essential=source.essential, recurrence_type=source.recurrence_type, amount_estimated=source.amount_estimated, contract_url=source.contract_url, contract_reference=source.contract_reference, tags=source.tags, notes=source.notes, created_by=user.id,
+        status='active', contract_holder=source.contract_holder, essential=source.essential, recurrence_type=source.recurrence_type, amount_estimated=source.amount_estimated, contract_url=source.contract_url, contract_reference=source.contract_reference, tags=source.tags, notes=source.notes, created_by=user.id,
     )
     db.add(clone)
     db.flush()
@@ -1021,6 +1047,8 @@ def clone_expense(item_id: int, user: User = Depends(current_user), db: Session 
         db.add(ExpensePrice(expense_id=clone.id, amount=p.amount, valid_from=p.valid_from))
     db.commit()
     db.refresh(clone)
+    contracts.ensure_history(db, clone)
+    db.commit()
     return expense_dict(clone)
 
 
@@ -1028,6 +1056,7 @@ class BulkExpenseIn(BaseModel):
     ids: list[int] = []
     action: Literal['delete','status','category','account']
     value: Optional[Any] = None
+    keep_history: bool = False
 
 
 @app.post('/api/expenses/bulk')
@@ -1041,12 +1070,20 @@ def bulk_expenses(data: BulkExpenseIn, user: User = Depends(current_user), db: S
     rows = list(db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.id.in_(data.ids))))
     changed = 0
     for x in rows:
+        if data.action == 'delete' and data.keep_history:
+            contracts.archive_record(db,x); changed += 1
+            continue
         if data.action == 'delete':
+            db.execute(delete(StatementImport).where(StatementImport.expense_id == x.id))
             db.execute(delete(ExpenseChange).where(ExpenseChange.expense_id == x.id))
             db.execute(delete(ReminderAction).where(ReminderAction.expense_id == x.id))
             db.delete(x)
             changed += 1
             continue
+        contracts.ensure_history(db, x, assumed=True)
+        field = {'status':'status', 'category':'category_id', 'account':'account_id'}[data.action]
+        value = str(data.value) if data.action == 'status' else (int(data.value) if data.value not in (None, '') else None)
+        contracts.write_version(db, x, {field:value}, date.today())
         if data.action == 'status':
             x.status = str(data.value or 'active')
         elif data.action == 'category':
@@ -1283,6 +1320,9 @@ def _provider_refresh_loop():
 
 
 def reminder_event(x: Expense, today: date, days: int):
+    if x.is_archived:
+        return None
+    x = contracts.state_at(x, today)
     until = today + timedelta(days=days)
     row = expense_dict(x, today)
     end = row['effective_contract_end']
@@ -1335,8 +1375,8 @@ def reminders(user: User = Depends(current_user), db: Session = Depends(get_db))
     today = date.today()
     days = reminder_days_for(db, user)
     result = []
-    for x in db.scalars(select(Expense).where(Expense.created_by == user.id, Expense.entry_type == 'expense').order_by(Expense.name)):
-        if not is_effectively_active(x, today):
+    for x in db.scalars(select(Expense).where(Expense.created_by == user.id).order_by(Expense.name)):
+        if not is_effectively_active(x, today) or contracts.state_at(x,today).entry_type != 'expense':
             continue
         item = reminder_event(x, today, days)
         if not item:
@@ -1375,6 +1415,7 @@ def reminder_action(expense_id: int, data: ReminderActionIn, user: User = Depend
             x.contract_end = effective_end
         x.auto_renew = False
         x.cancelled_on = today
+        contracts.write_version(db, x, {'contract_end': x.contract_end, 'auto_renew': False, 'cancelled_on': today}, today)
         updated = reminder_event(x, today, days)
         event_key = updated['event_key'] if updated else current['event_key']
         save_reminder_action(db, x.id, event_key, 'cancelled', user.id)
@@ -1418,6 +1459,8 @@ def _raw_expense(x: Expense) -> dict[str, Any]:
         'recurrence_type': x.recurrence_type or 'recurring', 'amount_estimated': bool(x.amount_estimated), 'contract_url': x.contract_url or '', 'contract_reference': x.contract_reference or '',
         'tags': x.tags, 'notes': x.notes, 'created_by': x.created_by,
         'created_at': _iso(x.created_at), 'updated_at': _iso(x.updated_at),
+        'contract_holder': x.contract_holder or '', 'is_archived': bool(x.is_archived), 'archived_on': _iso(x.archived_on), 'history_from': _iso(x.history_from),
+        'contract_versions': contracts.timeline(x),
         'prices': [{'id': p.id, 'amount': p.amount, 'valid_from': _iso(p.valid_from), 'created_at': _iso(p.created_at)} for p in x.prices],
     }
 
@@ -1434,16 +1477,42 @@ def _new_expense_from_export(row: dict, user_id: int, category_id: int | None, a
         cancellation_notice_days=row.get('cancellation_notice_days'), cancelled_on=_date(row.get('cancelled_on')),
         auto_renew=bool(row.get('auto_renew', False)), status=str(row.get('status') or 'active')[:20],
         essential=bool(row.get('essential', False)), recurrence_type=('one_time' if row.get('recurrence_type') == 'one_time' else 'recurring'), amount_estimated=bool(row.get('amount_estimated', False)), contract_url=str(row.get('contract_url') or '')[:500], contract_reference=str(row.get('contract_reference') or '')[:160], tags=str(row.get('tags') or '')[:255], notes=str(row.get('notes') or ''),
+        contract_holder=str(row.get('contract_holder') or '')[:160], is_archived=bool(row.get('is_archived')), archived_on=_date(row.get('archived_on')), history_from=_date(row.get('history_from')),
         created_by=user_id, created_at=_datetime(row.get('created_at')), updated_at=_datetime(row.get('updated_at')),
     )
 
     try:
-        validated = ExpenseIn.model_validate({key: getattr(x, key) for key in ExpenseIn.model_fields if key != 'price_effective_from'})
+        validated = ExpenseIn.model_validate({key: getattr(x, key) for key in ExpenseIn.model_fields if key not in {'price_effective_from', 'contract_effective_from', 'update_price'}})
         for key, value in normalized_expense_data(validated).items():
             setattr(x, key, value)
     except ValidationError:
         raise HTTPException(400, 'Export contains an invalid financial entry. Existing data has not been changed.')
     return x
+
+
+def _restore_contract_versions(db, x, row, categories=None, accounts=None):
+    seen = set()
+    for phase in row.get('contract_versions') or []:
+        effective = _date(phase.get('effective_from'))
+        if not effective or effective in seen or (x.history_from and effective < x.history_from):
+            raise HTTPException(400, 'Invalid or duplicate contract history date')
+        seen.add(effective)
+        values = dict(phase.get('values') or {})
+        if categories is not None:
+            values['category_id'] = categories.get((values.get('category'),values.get('category_scope')),categories.get(values.get('category')))
+        if accounts is not None:
+            values['account_id'] = accounts.get((values.get('account'),values.get('account_scope')),accounts.get(values.get('account')))
+        values['owner_name'] = (db.get(User, x.created_by).display_name or db.get(User, x.created_by).username)
+        try:
+            valid = ExpenseIn(**{**{k:getattr(x,k,None) for k in contracts.CONTRACT_FIELDS}, **values, 'amount':x.amount})
+            for key, value in normalized_expense_data(valid).items():
+                if key in contracts.CONTRACT_FIELDS:
+                    values[key] = value.isoformat() if isinstance(value, date) else value
+        except ValidationError:
+            raise HTTPException(400, 'Invalid contract history in export')
+        x.versions.append(ContractVersion(effective_from=effective, snapshot_json=json.dumps(values, ensure_ascii=False)))
+    db.flush()
+    contracts.ensure_history(db, x, assumed=not bool(row.get('contract_versions')))
 
 
 @app.get('/api/export/user')
@@ -1464,7 +1533,7 @@ def export_user_data(user: User = Depends(current_user), db: Session = Depends(g
     private_accounts = list(db.scalars(select(Account).where(Account.created_by == user.id).order_by(Account.id)))
     private_categories = list(db.scalars(select(Category).where(Category.created_by == user.id).order_by(Category.id)))
     return {
-        'format': 'pengucost-user-export', 'schema_version': 5, 'app_version': APP_VERSION,
+        'format': 'pengucost-user-export', 'schema_version': 6, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'user': {'username': user.username, 'display_name': user.display_name},
         'preferences': {'language': language_for(db, user), 'ai_prompt': ai_prompt_for(db, user), 'theme': theme_for(db, user), 'cancellation_reminder_days': reminder_days_for(db, user)},
@@ -1522,8 +1591,8 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
     private_categories_by_name = {x.name: x.id for x in db.scalars(select(Category).where(Category.created_by == user.id))}
     global_accounts_by_name = {x.name: x.id for x in db.scalars(select(Account).where(Account.created_by == None))}
     private_accounts_by_name = {x.name: x.id for x in db.scalars(select(Account).where(Account.created_by == user.id))}
-    categories_by_name = {**global_categories_by_name, **private_categories_by_name}
-    accounts_by_name = {**global_accounts_by_name, **private_accounts_by_name}
+    categories_by_name = {**global_categories_by_name, **private_categories_by_name, **{(k,'global'):v for k,v in global_categories_by_name.items()}, **{(k,'private'):v for k,v in private_categories_by_name.items()}}
+    accounts_by_name = {**global_accounts_by_name, **private_accounts_by_name, **{(k,'global'):v for k,v in global_accounts_by_name.items()}, **{(k,'private'):v for k,v in private_accounts_by_name.items()}}
     warnings: list[str] = []
     id_map: dict[int, int] = {}
     for row in expenses_in:
@@ -1552,6 +1621,8 @@ def import_user_data(payload: dict, user: User = Depends(current_user), db: Sess
                 db.add(ExpensePrice(expense_id=x.id, amount=float(p.get('amount') or 0), valid_from=_date(p.get('valid_from')) or date.today(), created_at=_datetime(p.get('created_at'))))
         else:
             db.add(ExpensePrice(expense_id=x.id, amount=x.amount, valid_from=x.start_date or date.today()))
+
+        _restore_contract_versions(db, x, row, categories_by_name, accounts_by_name)
 
     hidden = payload.get('hidden_catalog') or {}
     for name in hidden.get('accounts') or []:
@@ -1597,7 +1668,7 @@ def export_admin_data(_: User = Depends(require_admin), db: Session = Depends(ge
     categories = list(db.scalars(select(Category).order_by(Category.id)))
     expenses = list(db.scalars(select(Expense).order_by(Expense.id)))
     return {
-        'format': 'pengucost-admin-export', 'schema_version': 5, 'app_version': APP_VERSION,
+        'format': 'pengucost-admin-export', 'schema_version': 6, 'app_version': APP_VERSION,
         'exported_at': datetime.utcnow().isoformat() + 'Z',
         'users': [{'id': u.id, 'username': u.username, 'display_name': u.display_name, 'password_hash': u.password_hash, 'role': u.role, 'is_active': u.is_active, 'session_version': int(u.session_version or 0), 'created_at': _iso(u.created_at)} for u in users],
         'accounts': [{'id': x.id, 'name': x.name, 'kind': x.kind, 'note': x.note, 'created_by': x.created_by} for x in accounts],
@@ -1626,7 +1697,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
     # Destructive full restore. Order matters because expenses reference catalogs/users.
     # Detach the authenticated admin object so an imported user with the same primary key can be inserted cleanly.
     db.expunge(admin)
-    for table in ('statement_imports', 'statement_jobs', 'expense_changes', 'ai_messages', 'ai_conversations', 'ai_brains', 'reminder_actions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
+    for table in ('statement_imports', 'statement_jobs', 'expense_changes', 'ai_messages', 'ai_conversations', 'ai_brains', 'reminder_actions', 'contract_versions', 'expense_prices', 'expenses', 'hidden_catalog_items', 'ai_profiles', 'settings', 'categories', 'accounts', 'users'):
         db.execute(text(f'DELETE FROM {table}'))
     db.flush()
     for u in users_in:
@@ -1641,6 +1712,7 @@ def import_admin_data(payload: dict, admin: User = Depends(require_admin), db: S
         x.id = int(row['id']); db.add(x); db.flush()
         for p in row.get('prices') or []:
             db.add(ExpensePrice(id=int(p['id']), expense_id=x.id, amount=float(p.get('amount') or 0), valid_from=_date(p.get('valid_from')) or date.today(), created_at=_datetime(p.get('created_at'))))
+        _restore_contract_versions(db, x, row)
     for x in payload.get('hidden_catalog_items') or []:
         db.add(HiddenCatalogItem(id=int(x['id']), user_id=int(x['user_id']), item_type=str(x['item_type']), item_id=int(x['item_id']), created_at=_datetime(x.get('created_at'))))
     for r in payload.get('reminder_actions') or []:
@@ -2252,6 +2324,8 @@ def import_statement_candidate(job_id: str, candidate_id: str, data: StatementIm
         else:
             db.add(x); db.flush()
             db.add(ExpensePrice(expense_id=x.id, amount=data.amount, valid_from=data.price_effective_from or data.start_date or date.today()))
+        if not x.versions:
+            db.flush(); contracts.ensure_history(db, x)
         db.add(StatementImport(job_id=job_id, candidate_id=candidate_id, expense_id=x.id))
         db.add(ExpenseChange(expense_id=x.id, user_id=user.id, action='statement_update' if data.target_expense_id else 'statement_import', changes_json='{}'))
         db.commit()
@@ -2262,6 +2336,9 @@ def import_statement_candidate(job_id: str, candidate_id: str, data: StatementIm
     _schedule_provider_icon(background_tasks, db, x.provider, x.provider_website)
     return expense_dict(x)
 
+
+from .contract_routes import register_contract_routes
+register_contract_routes(app, current_user, get_db, owned_expense, expense_dict)
 
 PROVIDER_ICON_DIR.mkdir(parents=True, exist_ok=True)
 app.mount('/provider-icons', StaticFiles(directory=PROVIDER_ICON_DIR), name='provider-icons')
