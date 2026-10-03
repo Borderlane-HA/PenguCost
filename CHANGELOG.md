@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Show the contract save assistant only for changes that affect cost or term (amount, currency, billing interval, renewal price, start/end, term/renewal duration, renewal toggle, status or recurrence).
+- Save descriptive changes such as name, provider, URLs, notes, account/category, holder and cancellation deadline/notice directly, retaining dated history.
+- Compare edits of selected historical/planned versions with their prefilled version, so a descriptive correction does not rewrite its retained price or trigger review merely because today’s terms differ.
+
 ## 0.6.0
 
 - Add dated contract versions, retaining provider, term, account, category, holder, user assignment and cancellation/renewal rules alongside existing price history.

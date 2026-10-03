@@ -88,7 +88,7 @@ pct exec <VMID> -- /usr/local/sbin/pengucost-update stable
 Update to a specific version:
 
 ```bash
-pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.6.0
+pct exec <VMID> -- /usr/local/sbin/pengucost-update v0.6.1
 ```
 
 The Proxmox updater automatically creates a backup before applying the update and performs a health check afterwards. It also cleans stale Docker build cache before the build and checks that enough free disk space is available. If an older small LXC runs out of space, enlarge it on the Proxmox host, for example with `pct resize <VMID> rootfs +8G`. The update helper is source-controlled and refreshes itself after successful updates.
@@ -264,9 +264,9 @@ Details and review findings: [Statement assistant](docs/STATEMENT-ASSISTANT.md),
 [Project review](docs/PROJECT-REVIEW-0.5.0.md).
 
 
-## Vertragsmanagement und Kalender (0.6.0)
+## Vertragsmanagement und Kalender (0.6.1)
 
-Beim Bearbeiten bestehender Einträge führt ein Assistent durch datierte Änderungen
+Bei Änderungen an Kosten oder Laufzeit führt ein Assistent durch datierte Änderungen
 für Preis, Laufzeit, Kündigungsregel und automatische Verlängerung. Konto, Rubrik
 und Vertragsinhaber gehören zum datierten Vertragsstand. Zukünftige Änderungen
 werden erst am gewählten Datum wirksam; frühere Stände bleiben im Kalender erhalten.
@@ -281,3 +281,7 @@ Kosten werden nach Kalendertagen anteilig verteilt, nicht nach Abbuchungstermine
 Historische Vertragsdaten, die vor dem Update nicht gespeichert wurden, werden als
 übernommener Bestand gekennzeichnet. Lies die [Update-Hinweise](UPDATE-0.6.0.md) und
 die [Vertragslogik](docs/CONTRACTS-CALENDAR.md).
+
+Namens-, Anbieter-, URL- und Notizänderungen werden seit 0.6.1 direkt gespeichert,
+ohne den Vertragsassistenten zu öffnen. Sie behalten weiterhin datierte Historie.
+[Update 0.6.0 → 0.6.1](UPDATE-0.6.1.md).

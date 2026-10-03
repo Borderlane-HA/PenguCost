@@ -37,7 +37,7 @@ from .statements import (MAX_FILES, MAX_BYTES, MAX_PAGES, MAX_TRANSACTIONS, Stat
 
 from . import contracts
 
-APP_VERSION = '0.6.0'
+APP_VERSION = '0.6.1'
 app = FastAPI(title='PenguCost', version=APP_VERSION)
 Base.metadata.create_all(engine)
 

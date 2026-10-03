@@ -1,4 +1,4 @@
-# Vertragsmanagement und Kalender — 0.6.0
+# Vertragsmanagement und Kalender — 0.6.1
 
 ## Datierte Vertragsstände
 
@@ -13,6 +13,11 @@ Für jedes Datum gilt der letzte Stand mit Wirksamkeitsdatum bis zu diesem Tag.
 aktuelle Listen, Erinnerungen und KI-Auswahl erst ab diesem Datum. Ein neuer
 Stand ersetzt einen vorhandenen Stand am selben Tag; spätere geplante Stände
 werden nicht automatisch umgeschrieben. Prüfe diese bei weiteren Änderungen.
+
+Der Assistent erscheint nur bei Änderungen an Kosten oder Laufzeit. Name,
+Anbieter, URLs, Notizen, Konto/Rubrik, Vertragsinhaber und reine Kündigungsangaben
+werden direkt gespeichert. Auch diese Änderungen behalten die datierte Historie.
+Für ausgewählte frühere/geplante Stände gilt deren Wirksamkeitsdatum; sonst heute.
 
 Der Assistent bietet getrennte Daten für Preis und Vertragsangaben. Wird nur
 Metadaten geändert, bleibt die bestehende Preisplanung erhalten. Rückwirkende
